@@ -1,12 +1,16 @@
-# esp32-jbd
+# Elespa ERI — CAN interfacing
 
-ESP32-S3 telemetry bridge for a JBD (Jiabaida) BMS. Reads the pack over UART
-and CAN, cross-checks the two, and publishes each reading into a RAM-only ring
-buffer that any other part of the firmware can read.
+ESP32-S3 firmware for talking to CAN devices. Each device is described by a
+**bus profile** carrying everything needed to bring its bus up plus metadata
+about what is on the other end; the JBD BMS is the first worked example, with a
+Daly BMS and a 2024 Activa's OBD-II port to follow.
 
-Known-good Arduino sketches this was derived from live in
-[`../safe-save-copy-esp32/`](../safe-save-copy-esp32/). They are frozen; this is
-where new work happens.
+Telemetry from any link lands in a RAM-only ring buffer that the rest of the
+firmware reads through a const handle.
+
+Grew out of the JBD bring-up; that baseline is preserved on the **`jbd-bms`**
+branch, and the frozen hardware-validated Arduino sketches are in
+[`reference/safe-save-copy-esp32/`](reference/safe-save-copy-esp32/).
 
 ---
 
@@ -14,8 +18,7 @@ where new work happens.
 
 1. Install the **PlatformIO IDE** extension (`platformio.platformio-ide`) from
    the marketplace.
-2. Open **this folder** (`esp32-jbd`), not its parent. PlatformIO keys off
-   `platformio.ini` at the root.
+2. Open **this folder** — `platformio.ini` sits at the repo root.
 3. The toolchain is already downloaded under `~/.platformio`, so the extension
    will not re-fetch ~500 MB.
 
@@ -40,6 +43,11 @@ same project files, same builds, and it is what these commands use.
 ```
 include/                 public headers
   app_config.h           MASTER TOGGLES - CAN mode, LED brightness
+  can/
+    can_timing.h         bitrate -> register arithmetic (pure)
+    can_bus_profile.h    the profile structure + validation
+    can_profile_registry.h  lookup into the static table
+    twai_profile.h       profile -> ESP32 TWAI registers (the only HW file)
   bms_types.h            BmsSnapshot - the shared data model
   bms_link.h             IBmsLink    - a source of telemetry
   bms_sink.h             IBmsSink    - a consumer of telemetry
@@ -59,6 +67,7 @@ src/
   jbd_protocol.cpp       pure decode        <- no Arduino, host-testable
   telemetry.cpp          owns the one ring instance
   status_led.cpp         LED arbitration + the named states
+  can/                   timing, profile utilities, THE PROFILE TABLE
   links/                 jbd_uart_link.cpp, jbd_can_link.cpp
   sinks/                 serial_sink.cpp
   consumers/             summary_consumer.cpp
@@ -68,7 +77,11 @@ test/
   test_protocol/         decode tests, fixtures captured off the real pack
   test_ring/             ring overflow, ordering, both read paths
   test_status_led/       LED priority, expiry, blink, token safety
+  test_can_profile/      timing solver, validation rules, registry
 ```
+
+Plus `docs/` (bring-up notes) and `reference/` (frozen sketches, superseded
+files). `tools/serial_read.py` still does bounded non-interactive captures.
 
 All three test suites run on the host: **29 tests in about a second, no board.**
 
@@ -136,6 +149,69 @@ Without that check you will eventually read "discharge MOSFET off" from a frame
 that never arrived. `computeDerived()` honours `cellsReadMask`, so a partial
 cell read reports `cellsRead < cellCount` and its sum/min/max cover only the
 channels actually received.
+
+## CAN bus profiles
+
+A `CanBusProfile` is everything needed to bring up one device's bus, plus who is
+on the other end. Pure data with pure helpers — no TWAI, no Arduino — so all of
+it tests on the host. `can/twai_profile.h` is the only file that touches
+hardware.
+
+```cpp
+const can::CanBusProfile *p = can::findProfile("jbd-sp24s");
+const char *why = nullptr;
+if (can::startFromProfile(*p, &why)) { /* bus is up */ }
+```
+
+The field that actually generalises is **`Interaction`**. Devices differ far
+more in *how* you get data out of them than in bitrate or pins:
+
+| Interaction | Meaning | Device |
+|---|---|---|
+| `kRemoteFrameQuery` | RTR out, data frame back on the same id | JBD BMS |
+| `kDataFrameRequest` | data frame out, reply on a different id | Daly BMS |
+| `kBroadcastListen` | device transmits unprompted; host only listens | sniffing |
+| `kIsoTp` | ISO 15765-2 segmented transport with flow control | OBD-II / UDS |
+
+A profile carrying only bitrate and an id list handles the first and breaks on
+the last, because ISO-TP needs a segmentation layer underneath. Hence the
+transport lives in the profile.
+
+**Bit timing is solved, not hard-coded.** `computeBitTiming()` derives
+`brp`/`tseg1`/`tseg2`/`sjw` for any exact bitrate and sample point, so a profile
+can name 250 k or 800 k without anyone writing another
+`TWAI_TIMING_CONFIG_*`. It refuses inexact bitrates rather than rounding — an
+approximate rate desynchronises a bus instead of degrading. The tests pin it
+against ESP-IDF's own canonical 125 k/250 k/500 k/1 M configs.
+
+**Two independent safety gates.** `AccessPolicy` is intent, `BusMode` is what
+the controller physically does, and `allowsTransmit()` requires both. A
+`kBroadcastListen` profile that is permitted to transmit fails validation
+outright — that combination would put unexpected frames on somebody else's bus.
+
+**`Provenance`** records how much to trust each entry: `kMeasured`,
+`kDatasheet`, `kVendorDoc`, `kUnverified`. Do not mark something measured
+because a forum post said so.
+
+### The table
+
+All profiles live in one `constexpr` array in
+[`src/can/can_profile_registry.cpp`](src/can/can_profile_registry.cpp) — no RAM,
+no persistence, everything visible in one file. Adding a device is one entry.
+
+| Key | Device | Notes |
+|---|---|---|
+| `jbd-sp24s` | JBD SP24S007 BMS | every value measured on the bench |
+| `sniff-500k` | generic 500 k sniffer | listen-only, ACKs nothing |
+| `sniff-250k` | generic 250 k sniffer | listen-only, ACKs nothing |
+
+The sniffers transmit **nothing at all** — not even an ACK — which makes them
+the safe way onto a bus you do not own. Use them to discover the Daly's and the
+Activa's parameters before writing profiles for those.
+
+Daly and OBD-II are deliberately **absent rather than guessed**; the registry
+comments record what each will need. `validateAll()` checks every entry and is
+worth calling once at boot.
 
 ## CAN transmission mode
 
