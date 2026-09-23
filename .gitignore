@@ -1,0 +1,17 @@
+# PlatformIO / toolchain
+.pio/
+.venv/
+compile_commands.json
+
+# VS Code: PlatformIO regenerates these per machine
+.vscode/
+
+# build artefacts
+*.o
+*.a
+*.elf
+
+# editor scratch
+*.swp
+*~
+.DS_Store
