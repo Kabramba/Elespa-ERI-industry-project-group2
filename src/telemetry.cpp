@@ -6,9 +6,13 @@ namespace {
 // runtime on every boot, never written to flash, NVS or EEPROM. Deliberately
 // not RTC_DATA_ATTR / RTC_NOINIT_ATTR, which would survive a reset.
 TelemetryRing g_ring;
+VehicleRing   g_vehicleRing;
 }  // namespace
 
 const TelemetryRing &telemetry() { return g_ring; }
 TelemetryRing       &telemetryProducer() { return g_ring; }
+
+const VehicleRing &vehicleTelemetry() { return g_vehicleRing; }
+VehicleRing       &vehicleTelemetryProducer() { return g_vehicleRing; }
 
 }  // namespace app

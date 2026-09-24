@@ -42,7 +42,7 @@ void hardwareWrite(uint8_t r, uint8_t g, uint8_t b) { neopixelWrite(STATUS_LED_P
 
 void StatusLed::begin(Writer w, uint8_t brightnessPercent) {
   {
-    jbd::LockGuard g(lock_);
+    util::LockGuard g(lock_);
     memset(slots_, 0, sizeof(slots_));
     sequence_   = 0;
     activeIdx_  = -1;
@@ -60,14 +60,14 @@ void StatusLed::begin(Writer w, uint8_t brightnessPercent) {
 
 void StatusLed::setBrightness(uint8_t percent) {
   {
-    jbd::LockGuard g(lock_);
+    util::LockGuard g(lock_);
     brightness_ = percent > 100 ? 100 : percent;
   }
   everWrote_ = false;  // force the next tick() to re-send at the new scale
 }
 
 Token StatusLed::claim(const Pattern &p, uint32_t holdMs, uint32_t now) {
-  jbd::LockGuard g(lock_);
+  util::LockGuard g(lock_);
 
   int idx = -1;
   for (size_t i = 0; i < kMaxClaims; ++i)
@@ -107,7 +107,7 @@ void StatusLed::release(Token t) {
   const uint16_t gen = static_cast<uint16_t>(t >> 16);
   if (idx == 0 || idx > kMaxClaims) return;
 
-  jbd::LockGuard g(lock_);
+  util::LockGuard g(lock_);
   Slot          &s = slots_[idx - 1];
   // The generation check stops a stale token from freeing a slot that has since
   // been reused by somebody else.
@@ -115,7 +115,7 @@ void StatusLed::release(Token t) {
 }
 
 void StatusLed::releaseAll() {
-  jbd::LockGuard g(lock_);
+  util::LockGuard g(lock_);
   for (Slot &s : slots_) s.used = false;
   activeIdx_ = -1;
 }
@@ -143,7 +143,7 @@ void StatusLed::tick(uint32_t now) {
 
   Color target{0, 0, 0};
   {
-    jbd::LockGuard g(lock_);
+    util::LockGuard g(lock_);
     for (Slot &s : slots_)
       if (s.used && s.expiresAtMs != 0 && static_cast<int32_t>(now - s.expiresAtMs) >= 0)
         s.used = false;
@@ -176,14 +176,14 @@ void StatusLed::write(Color c) {
 }
 
 const Pattern *StatusLed::activePattern() const {
-  jbd::LockGuard g(lock_);
+  util::LockGuard g(lock_);
   if (activeIdx_ < 0) return nullptr;
   const Slot &s = slots_[activeIdx_];
   return s.used ? &s.pattern : nullptr;
 }
 
 size_t StatusLed::activeClaims() const {
-  jbd::LockGuard g(lock_);
+  util::LockGuard g(lock_);
   size_t n = 0;
   for (const Slot &s : slots_)
     if (s.used) ++n;

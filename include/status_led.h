@@ -100,7 +100,7 @@ class StatusLed {
   Color    last_              = {0, 0, 0};
 
   // Guards the slot table. Never held while the LED is written.
-  mutable jbd::SpinLock lock_;
+  mutable util::SpinLock lock_;
   bool     everWrote_         = false;
   int      activeIdx_         = -1;
 };

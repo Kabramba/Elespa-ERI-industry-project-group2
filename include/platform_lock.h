@@ -9,7 +9,7 @@
 
 #include "freertos/FreeRTOS.h"
 
-namespace jbd {
+namespace util {
 class SpinLock {
  public:
   void lock() const { portENTER_CRITICAL(&mux_); }
@@ -17,13 +17,13 @@ class SpinLock {
  private:
   mutable portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
 };
-}  // namespace jbd
+}  // namespace util
 
 #else
 
 #include <mutex>
 
-namespace jbd {
+namespace util {
 class SpinLock {
  public:
   void lock() const { m_.lock(); }
@@ -31,11 +31,11 @@ class SpinLock {
  private:
   mutable std::mutex m_;
 };
-}  // namespace jbd
+}  // namespace util
 
 #endif
 
-namespace jbd {
+namespace util {
 // RAII guard. Critical sections here are a few microseconds - one struct copy.
 class LockGuard {
  public:
@@ -46,4 +46,4 @@ class LockGuard {
  private:
   const SpinLock &l_;
 };
-}  // namespace jbd
+}  // namespace util

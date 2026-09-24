@@ -1,4 +1,9 @@
-// bms_ring.h - the IPC buffer between the link layer and whatever consumes it.
+// snapshot_ring.h - the IPC buffer between a producer and whatever consumes it.
+//
+// Generic over the payload type, because the battery and the vehicle produce
+// different shapes of data and must not share a buffer. T needs to be trivially
+// copyable and to have a `valid` member (latestRef() uses it to report "nothing
+// published yet").
 //
 // STORAGE: an instance declared `static` or at namespace scope lives in .bss/
 // .data, i.e. plain RAM. It is reinitialised by the C runtime on every boot and
@@ -34,18 +39,17 @@
 
 #include <atomic>
 
-#include "bms_types.h"
 #include "platform_lock.h"
 
-namespace jbd {
+namespace util {
 
-template <size_t N>
-class BmsRing {
+template <typename T, size_t N>
+class SnapshotRing {
   static_assert(N >= 2, "ring needs at least two slots");
 
  public:
   // ---- producer side ----------------------------------------------------
-  void publish(const BmsSnapshot &s) {
+  void publish(const T &s) {
     // Zero-copy path first: fill the half nobody is reading, then flip.
     const uint8_t cur = frontIdx_.load(std::memory_order_relaxed);
     const uint8_t nxt = static_cast<uint8_t>(cur ^ 1);
@@ -64,7 +68,7 @@ class BmsRing {
   // ---- consumer side (all const) ----------------------------------------
 
   // Newest snapshot, copied. False if nothing has been published yet.
-  bool latest(BmsSnapshot &out) const {
+  bool latest(T &out) const {
     LockGuard g(lock_);
     if (count_ == 0) return false;
     out = ring_[(head_ + N - 1) % N];
@@ -73,14 +77,14 @@ class BmsRing {
 
   // Newest snapshot, no copy. nullptr until the first publish.
   // Valid until two further publishes - see the header comment.
-  const BmsSnapshot *latestRef() const {
-    const BmsSnapshot *p = &front_[frontIdx_.load(std::memory_order_acquire)];
+  const T *latestRef() const {
+    const T *p = &front_[frontIdx_.load(std::memory_order_acquire)];
     return p->valid ? p : nullptr;
   }
 
   // Up to `max` of the most recent snapshots, written oldest-first.
   // Returns how many were written.
-  size_t history(BmsSnapshot *dst, size_t max) const {
+  size_t history(T *dst, size_t max) const {
     if (dst == nullptr || max == 0) return 0;
     LockGuard g(lock_);
     const size_t n     = (count_ < max) ? count_ : max;
@@ -107,15 +111,15 @@ class BmsRing {
   }
 
  private:
-  BmsSnapshot ring_[N] = {};
+  T ring_[N] = {};
   size_t      head_ = 0;
   size_t      count_ = 0;
   uint32_t    published_ = 0;
   uint32_t    overwritten_ = 0;
   SpinLock    lock_;
 
-  BmsSnapshot          front_[2] = {};
+  T                    front_[2] = {};
   std::atomic<uint8_t> frontIdx_{0};
 };
 
-}  // namespace jbd
+}  // namespace util

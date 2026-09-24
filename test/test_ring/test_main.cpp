@@ -2,9 +2,14 @@
 // read paths. Runs on the laptop, no hardware.
 #include <unity.h>
 
-#include "bms_ring.h"
+#include "bms_types.h"
+#include "snapshot_ring.h"
 
-using namespace jbd;
+using namespace util;
+using jbd::BmsSnapshot;
+
+template <size_t N>
+using BmsRing = SnapshotRing<BmsSnapshot, N>;
 
 void setUp(void) {}
 void tearDown(void) {}

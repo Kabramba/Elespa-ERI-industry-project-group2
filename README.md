@@ -100,6 +100,27 @@ Adding a transport means one more `IBmsLink`. Adding a consumer means one more
 `IBmsSink`. Neither touches the protocol layer, and `main.cpp` changes by one
 array entry.
 
+## The telemetry rings
+
+There are **two independent buffers**, because the battery and the vehicle
+produce different shapes of data at different rates and a stall in one must not
+displace the other:
+
+| Accessor | Payload | Depth |
+|---|---|---|
+| `app::telemetry()` | `jbd::BmsSnapshot` | 16 |
+| `app::vehicleTelemetry()` | `obd::VehicleSnapshot` | 8 |
+
+Both are `util::SnapshotRing<T, N>` — the same container, generic over payload.
+`platform_lock.h` and `snapshot_ring.h` live in `namespace util` because neither
+is specific to a battery.
+
+A `VehicleSnapshot` keeps **raw PID samples alongside the decoded fields**. An
+ECU's field set is not fixed — which PIDs exist varies by vehicle — so nothing
+the ECU said is discarded just because we lack a formula for it. Use
+`obd::hasPid()` before trusting a decoded value: a PID that never answered is
+not the same as a reading of zero.
+
 ## The telemetry ring
 
 `app::telemetry()` returns a `const TelemetryRing&` — every method reachable

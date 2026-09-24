@@ -23,7 +23,9 @@
 #include "can/can_profile_registry.h"
 #include "can/twai_profile.h"
 #include "obd/obd_isotp.h"
+#include "obd/vehicle_types.h"
 #include "status_led.h"
+#include "telemetry.h"
 
 namespace {
 
@@ -33,12 +35,29 @@ constexpr uint32_t kMinRequestGapMs = 60;   // ~16/s, under the 20/s ceiling
 constexpr uint32_t kReplyWindowMs   = 300;   // P2 is 50 ms; margin for a slow ECU
 constexpr uint32_t kPendingWindowMs = 5000;  // after NRC 0x78, per the reference
 constexpr uint32_t kBitrates[]      = {500000, 250000, 1000000, 125000};
+// Raw frame logging is for bring-up. Off by default so the serial monitor
+// shows readings rather than hex.
+constexpr bool     kVerboseFrames   = false;
 constexpr size_t   kBitrateCount    = sizeof(kBitrates) / sizeof(kBitrates[0]);
 
 bool                 g_txLatchedOff = false;
 uint32_t             g_lastTxMs     = 0;
 can::CanBusProfile   g_profile;      // the profile currently driving the bus
 bool                 g_haveProfile = false;
+
+// Service 09 identity is static for the life of the vehicle, so it is read once
+// and copied into every snapshot rather than re-requested each sweep.
+char     g_vin[20]     = {0};
+char     g_calId[20]   = {0};
+char     g_ecuName[24] = {0};
+uint32_t g_cvn         = 0;
+
+void copyAscii(char *dst, size_t dstMax, const uint8_t *src, size_t n, size_t skip) {
+  size_t o = 0;
+  for (size_t i = skip; i < n && o + 1 < dstMax; ++i)
+    if (src[i] >= 32 && src[i] < 127) dst[o++] = static_cast<char>(src[i]);
+  dst[o] = '\0';
+}
 
 // ---------------------------------------------------------------- the gate
 // The single point through which any frame may leave this node.
@@ -93,6 +112,7 @@ bool txGuarded(uint32_t id, const uint8_t *d, uint8_t dlc, bool *acked) {
 }
 
 void hexDump(const char *tag, uint32_t id, const uint8_t *d, uint8_t dlc) {
+  if (!kVerboseFrames) return;
   Serial.printf("   %s %0*lX#", tag, (g_profile.bus.frameFormat == can::FrameFormat::kExtended29) ? 8 : 3,
                 static_cast<unsigned long>(id));
   for (uint8_t i = 0; i < dlc; ++i) Serial.printf("%02X", d[i]);
@@ -394,8 +414,18 @@ void loop() {
       if (q.ascii) {
         for (size_t i = q.skip; i < n; ++i)
           Serial.printf("%c", (resp[i] >= 32 && resp[i] < 127) ? resp[i] : '.');
+        switch (q.pid) {
+          case 0x02: copyAscii(g_vin, sizeof(g_vin), resp, n, q.skip); break;
+          case 0x04: copyAscii(g_calId, sizeof(g_calId), resp, n, q.skip); break;
+          case 0x0A: copyAscii(g_ecuName, sizeof(g_ecuName), resp, n, q.skip); break;
+          default: break;
+        }
       } else {
         for (size_t i = q.skip; i < n; ++i) Serial.printf("%02X", resp[i]);
+        if (q.pid == 0x06 && n >= q.skip + 4)
+          g_cvn = (static_cast<uint32_t>(resp[q.skip]) << 24) |
+                  (static_cast<uint32_t>(resp[q.skip + 1]) << 16) |
+                  (static_cast<uint32_t>(resp[q.skip + 2]) << 8) | resp[q.skip + 3];
       }
       Serial.printf("\n");
     }
@@ -411,7 +441,14 @@ void loop() {
   }
 
   // ---------------- every supported Service 01 PID, every page -------------
-  Serial.printf("\n########## LIVE DATA ##########\n");
+  static obd::VehicleSnapshot snap;
+  obd::reset(snap);
+  snap.bitrate            = foundBitrate;
+  snap.extendedAddressing = (g_profile.bus.frameFormat == can::FrameFormat::kExtended29);
+  strncpy(snap.vin, g_vin, sizeof(snap.vin) - 1);
+  strncpy(snap.calibrationId, g_calId, sizeof(snap.calibrationId) - 1);
+  strncpy(snap.ecuName, g_ecuName, sizeof(snap.ecuName) - 1);
+  snap.cvn = g_cvn;
 
   // PIDs 0x00, 0x20, 0x40 ... each return a bitmap for the next 32. Bit 0 of
   // byte D says whether the following page exists, so walk while it is set.
@@ -443,15 +480,56 @@ void loop() {
     uint8_t      r[64];
     const size_t rn = ask(0x01, &q, 1, r, sizeof(r), &acked);
     if (rn >= 2 && r[0] == 0x41) {
-      Serial.printf("   PID %02X ->", q);
-      for (size_t k = 2; k < rn; ++k) Serial.printf(" %02X", r[k]);
-      Serial.printf("\n");
-      decodeService01(q, r, rn);
-    } else {
-      Serial.printf("   PID %02X -> no response\n", q);
+      obd::addSample(snap, q, (rn > 2) ? &r[2] : nullptr, static_cast<uint8_t>(rn - 2));
+      if (kVerboseFrames) {
+        Serial.printf("   PID %02X ->", q);
+        for (size_t k = 2; k < rn; ++k) Serial.printf(" %02X", r[k]);
+        Serial.printf("\n");
+        decodeService01(q, r, rn);
+      }
     }
     status::tick();
   }
+
+  obd::decodeAll(snap);
+  snap.uptimeMs = millis();
+  snap.valid    = true;
+  app::vehicleTelemetryProducer().publish(snap);
+
+  // Read it back through the const handle - the same path any other consumer
+  // would use. This is a reader, not the producer's own copy.
+  const app::VehicleRing   &ring = app::vehicleTelemetry();
+  const obd::VehicleSnapshot *v  = ring.latestRef();
+  if (v == nullptr) { delay(3000); return; }
+
+  Serial.printf("\n======== VEHICLE  t=%lu ms ========\n", static_cast<unsigned long>(v->uptimeMs));
+  Serial.printf("  VIN %s   ECU %s   cal %s   CVN %08lX\n", v->vin, v->ecuName, v->calibrationId,
+                static_cast<unsigned long>(v->cvn));
+  Serial.printf("  link %lu bit/s %s   %u PIDs sampled\n", static_cast<unsigned long>(v->bitrate),
+                v->extendedAddressing ? "29-bit" : "11-bit", v->sampleCount);
+  Serial.printf("  MIL %s   stored DTCs %u\n", v->milOn ? "ON" : "off", v->storedDtcCount);
+
+  // A field is printed only if its PID actually answered; a missing PID is not
+  // the same as a reading of zero.
+  struct Row { uint8_t pid; const char *label; const float *value; const char *unit; };
+  const Row rows[] = {
+      {0x0C, "RPM", &v->rpm, ""},          {0x0D, "speed", &v->speedKph, "km/h"},
+      {0x04, "engine load", &v->engineLoadPct, "%"},
+      {0x11, "throttle", &v->throttlePct, "%"},
+      {0x0B, "MAP", &v->mapKpa, "kPa"},    {0x0F, "intake air", &v->intakeAirC, "C"},
+      {0x5C, "oil temp", &v->oilTempC, "C"},
+      {0x0E, "timing adv", &v->timingAdvanceDeg, "deg"},
+      {0x06, "short trim", &v->shortFuelTrimPct, "%"},
+  };
+  for (const Row &r : rows)
+    if (obd::hasPid(*v, r.pid)) Serial.printf("  %-12s %8.1f %s\n", r.label, *r.value, r.unit);
+  if (v->distanceWithMilKm != 0xFFFF)
+    Serial.printf("  %-12s %8u km\n", "dist w/ MIL", v->distanceWithMilKm);
+
+  Serial.printf("  buffer: %u/%u held, %lu published, %lu discarded\n",
+                static_cast<unsigned>(ring.count()), static_cast<unsigned>(ring.capacity()),
+                static_cast<unsigned long>(ring.publishedCount()),
+                static_cast<unsigned long>(ring.overwrittenCount()));
 
   status::tick();
   delay(3000);

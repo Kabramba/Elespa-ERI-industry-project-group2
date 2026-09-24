@@ -8,17 +8,26 @@
 
 #include <stddef.h>
 
-#include "bms_ring.h"
+#include "bms_types.h"
+#include "obd/vehicle_types.h"
+#include "snapshot_ring.h"
 
 namespace app {
 
+// Battery telemetry. Separate buffer from the vehicle's - they have different
+// shapes, different rates, and a stall in one must not displace the other.
 constexpr size_t kHistoryDepth = 16;
-using TelemetryRing = jbd::BmsRing<kHistoryDepth>;
+using TelemetryRing = util::SnapshotRing<jbd::BmsSnapshot, kHistoryDepth>;
 
-// For anything that reads. Every method reachable through this is const.
-const TelemetryRing &telemetry();
+const TelemetryRing &telemetry();          // consumers: every method is const
+TelemetryRing       &telemetryProducer();  // the poll loop, and nothing else
 
-// For the poll loop, and nothing else.
-TelemetryRing &telemetryProducer();
+// Vehicle (OBD-II) telemetry. Its own buffer, shallower because each snapshot
+// is a whole PID sweep rather than a single reading.
+constexpr size_t kVehicleHistoryDepth = 8;
+using VehicleRing = util::SnapshotRing<obd::VehicleSnapshot, kVehicleHistoryDepth>;
+
+const VehicleRing &vehicleTelemetry();
+VehicleRing       &vehicleTelemetryProducer();
 
 }  // namespace app
