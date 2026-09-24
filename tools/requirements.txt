@@ -1,0 +1,5 @@
+# Dashboard dependencies. Installed into the project's .venv:
+#   .venv/bin/pip install -r tools/requirements.txt
+fastapi
+uvicorn[standard]
+pyserial

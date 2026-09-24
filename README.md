@@ -180,10 +180,22 @@ channels actually received.
 ./dash esp -l run.log
 ```
 
-`./dash` is a thin wrapper over `tools/activa_dashboard.py`; the port stays an
-explicit argument, it just saves typing. Run it with no arguments and it lists
-the ports that actually exist right now. `q` quits, `r` resets history, `p`
-pauses the raw pane; `-l FILE` appends the raw stream to a log.
+It opens a browser at `http://127.0.0.1:8477/`. `./dash` is a thin wrapper over
+`tools/activa_dashboard.py`; the port stays an explicit argument, it just saves
+typing, and with no arguments it lists the ports that exist right now.
+`--http-port N` moves the web port, `--no-browser` suppresses the auto-open,
+`-l FILE` appends the raw stream to a log. Ctrl-C stops it.
+
+The page shows a card per PID with the live value, its rate of change over a
+one-second window, and a chart of recent history, plus the raw serial stream and
+link statistics. Charts are drawn on a canvas by hand and nothing is fetched
+from a CDN, so it works with no internet.
+
+Dependencies live in the project venv:
+
+```bash
+.venv/bin/pip install -r tools/requirements.txt
+```
 
 Division of labour: **the firmware emits frames, the dashboard decodes them.**
 `esp32s3_activa_obd` prints only two line shapes —

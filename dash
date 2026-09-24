@@ -50,4 +50,5 @@ if [ -z "$PORT" ] || [ ! -e "$PORT" ]; then
   exit 1
 fi
 
-exec python3 tools/activa_dashboard.py "$PORT" "$@"
+# .venv has fastapi/uvicorn/pyserial; the system python does not.
+exec .venv/bin/python3 tools/activa_dashboard.py "$PORT" "$@"

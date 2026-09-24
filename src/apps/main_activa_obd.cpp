@@ -44,6 +44,11 @@ constexpr uint8_t  kHotPid         = 0x0C;
 constexpr uint8_t  kRotating[]     = {0x11, 0x0B, 0x0E, 0x04};
 constexpr size_t   kRotatingCount  = sizeof(kRotating) / sizeof(kRotating[0]);
 constexpr uint32_t kFullSweepEvery = 120;
+// Metadata is re-announced on a short cycle, not just once at boot. A dashboard
+// started while the board is already running opens the port mid-stream - and
+// pyserial flushes the input buffer on open - so a one-shot banner is missed
+// and the client waits forever for a mode line that already went past.
+constexpr uint32_t kMetaEvery = 16;
 
 bool               g_txLatchedOff = false;
 uint32_t           g_lastTxMs     = 0;
@@ -336,8 +341,9 @@ void loop() {
   snap.valid    = true;
   app::vehicleTelemetryProducer().publish(snap);
 
-  if (fullSweep) {
+  if ((cycle % kMetaEvery) == 0) {
     const app::VehicleRing &ring = app::vehicleTelemetry();
+    Serial.printf("# MODE activa-obd\n");
     Serial.printf("# LINK %lu %s\n", static_cast<unsigned long>(snap.bitrate),
                   snap.extendedAddressing ? "29bit" : "11bit");
     Serial.printf("# VIN %s\n# ECU %s\n# CAL %s\n# CVN %08lX\n", snap.vin, snap.ecuName,
