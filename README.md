@@ -174,11 +174,16 @@ channels actually received.
 ## Live dashboard
 
 ```bash
-./tools/activa_dashboard.py /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B5E083130-if00
+./dash esp          # resolve the board by its USB id, whatever ttyACMn it landed on
+./dash 0            # /dev/ttyACM0
+./dash ACM1         # /dev/ttyACM1
+./dash esp -l run.log
 ```
 
-The port is a required argument. `q` quits, `r` resets history, `p` pauses the
-raw pane; `-l FILE` also appends the raw stream to a log.
+`./dash` is a thin wrapper over `tools/activa_dashboard.py`; the port stays an
+explicit argument, it just saves typing. Run it with no arguments and it lists
+the ports that actually exist right now. `q` quits, `r` resets history, `p`
+pauses the raw pane; `-l FILE` appends the raw stream to a log.
 
 Division of labour: **the firmware emits frames, the dashboard decodes them.**
 `esp32s3_activa_obd` prints only two line shapes —

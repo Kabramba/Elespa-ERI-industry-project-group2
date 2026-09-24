@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Launch the Activa ECU dashboard.
+#
+#   ./dash 0        -> /dev/ttyACM0
+#   ./dash ACM1     -> /dev/ttyACM1
+#   ./dash esp      -> whatever /dev/serial/by-id/ currently points at
+#   ./dash /dev/ttyACM0
+#
+# The port stays an explicit argument; this only saves typing. Anything after
+# the port is passed straight through (e.g. -l run.log).
+set -euo pipefail
+cd "$(dirname "$0")"
+
+show_ports() {
+  echo "ports available now:"
+  local found=0
+  for p in /dev/ttyACM* /dev/ttyUSB*; do
+    [ -e "$p" ] || continue
+    echo "  $p"
+    found=1
+  done
+  if [ -d /dev/serial/by-id ]; then
+    for l in /dev/serial/by-id/*; do
+      [ -e "$l" ] || continue
+      echo "  $l  ->  $(readlink -f "$l")"
+      found=1
+    done
+  fi
+  [ "$found" = 1 ] || echo "  (none - is the board plugged in?)"
+}
+
+if [ $# -lt 1 ]; then
+  echo "usage: ./dash <port> [options]"
+  echo
+  show_ports
+  exit 1
+fi
+
+PORT="$1"; shift
+case "$PORT" in
+  [0-9])        PORT="/dev/ttyACM$PORT" ;;
+  ACM*|USB*)    PORT="/dev/tty$PORT" ;;
+  esp|byid|id)  PORT="$(ls -1 /dev/serial/by-id/usb-1a86_* 2>/dev/null | head -1 || true)" ;;
+esac
+
+if [ -z "$PORT" ] || [ ! -e "$PORT" ]; then
+  echo "no such port: ${PORT:-<none found>}"
+  echo
+  show_ports
+  exit 1
+fi
+
+exec python3 tools/activa_dashboard.py "$PORT" "$@"
