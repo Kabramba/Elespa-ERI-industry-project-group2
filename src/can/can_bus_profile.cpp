@@ -79,6 +79,19 @@ bool allowsTransmit(const CanBusProfile &p) {
   return true;
 }
 
+bool mayTransmitId(const CanBusProfile &p, uint32_t id) {
+  if (!allowsTransmit(p)) return false;
+  if (p.txAllow.count == 0) return false;  // fail closed
+  if (!idFitsFormat(p, id)) return false;
+  for (uint8_t i = 0; i < p.txAllow.count && i < kMaxTxRules; ++i) {
+    const TxRule &r = p.txAllow.rules[i];
+    if (id < r.first || id > r.last) continue;
+    if (r.mask != 0 && (id & r.mask) != (r.first & r.mask)) continue;
+    return true;
+  }
+  return false;
+}
+
 bool idFitsFormat(const CanBusProfile &p, uint32_t id) {
   switch (p.bus.frameFormat) {
     case FrameFormat::kStandard11: return id <= 0x7FFu;
@@ -133,6 +146,12 @@ bool validate(const CanBusProfile &p, const char **reason) {
       why = "remote-frame-query needs an id range to poll";
     } else if (p.protocol.retries == 0) {
       why = "retries must be at least 1";
+    } else if (allowsTransmit(p) && p.txAllow.count == 0) {
+      // Being permitted to transmit without declaring what is the bug this
+      // whole mechanism exists to prevent.
+      why = "profile may transmit but its TX allowlist is empty";
+    } else if (!allowsTransmit(p) && p.txAllow.count != 0) {
+      why = "passive profile declares TX rules, which is contradictory";
     }
   }
 

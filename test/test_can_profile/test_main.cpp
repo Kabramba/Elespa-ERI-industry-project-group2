@@ -6,6 +6,7 @@
 
 #include <unity.h>
 
+#include "can/active_profile.h"
 #include "can/can_bus_profile.h"
 #include "can/can_profile_registry.h"
 #include "can/can_timing.h"
@@ -75,6 +76,10 @@ static CanBusProfile makeValid() {
   p.protocol.idLast      = 0x110;
   p.protocol.retries     = 2;
   p.access               = AccessPolicy::kReadOnlyQueries;
+  // A profile permitted to transmit must declare what; an empty allowlist is
+  // now a validation error, which is the point of the mechanism.
+  p.txAllow.rules[0] = {0x100, 0x110, 0};
+  p.txAllow.count    = 1;
   return p;
 }
 
@@ -195,6 +200,121 @@ static void test_sniffer_profiles_are_passive(void) {
   }
 }
 
+// ------------------------- transmit allowlist -------------------------------
+
+// The guard the Activa reference calls non-negotiable: every transmit goes
+// through mayTransmitId(), and anything not explicitly listed is refused.
+static void test_obd11_transmit_allowlist(void) {
+  const CanBusProfile *p = findProfile("activa-obd11");
+  TEST_ASSERT_NOT_NULL(p);
+  TEST_ASSERT_TRUE(mayTransmitId(*p, 0x7DF));   // functional request
+  TEST_ASSERT_TRUE(mayTransmitId(*p, 0x7E0));   // physical request
+  TEST_ASSERT_TRUE(mayTransmitId(*p, 0x7E7));
+  TEST_ASSERT_FALSE(mayTransmitId(*p, 0x7E8));  // that is the ECU's reply id
+  TEST_ASSERT_FALSE(mayTransmitId(*p, 0x123));  // anything else on the vehicle bus
+  TEST_ASSERT_FALSE(mayTransmitId(*p, 0x000));
+}
+
+// 0x18DAxxF1 cannot be expressed as a plain range: the low byte is fixed, so
+// the mask has to do the work.
+static void test_obd29_mask_pins_the_fixed_bytes(void) {
+  const CanBusProfile *p = findProfile("activa-obd29");
+  TEST_ASSERT_NOT_NULL(p);
+  TEST_ASSERT_TRUE(mayTransmitId(*p, 0x18DB33F1));   // functional
+  TEST_ASSERT_TRUE(mayTransmitId(*p, 0x18DA10F1));   // physical to ECU 0x10
+  TEST_ASSERT_TRUE(mayTransmitId(*p, 0x18DA33F1));
+  TEST_ASSERT_FALSE(mayTransmitId(*p, 0x18DA1055));  // in range, wrong low byte
+  TEST_ASSERT_FALSE(mayTransmitId(*p, 0x18DAF110));  // that is a response id
+  TEST_ASSERT_FALSE(mayTransmitId(*p, 0x18FF00F1));  // wrong high half
+}
+
+// A passive profile must refuse every id, with no exceptions and no ordering
+// dependence on how it was configured.
+static void test_listen_profiles_transmit_nothing(void) {
+  for (const char *key : {"activa-listen", "sniff-500k", "sniff-250k", "sniff-1m", "sniff-125k"}) {
+    const CanBusProfile *p = findProfile(key);
+    TEST_ASSERT_NOT_NULL_MESSAGE(p, key);
+    TEST_ASSERT_EQUAL_UINT8(0, p->txAllow.count);
+    TEST_ASSERT_FALSE(allowsTransmit(*p));
+    TEST_ASSERT_FALSE(mayTransmitId(*p, 0x7DF));
+    TEST_ASSERT_FALSE(mayTransmitId(*p, 0x000));
+    TEST_ASSERT_FALSE(mayTransmitId(*p, 0x1FFFFFFF));
+  }
+}
+
+// An empty allowlist refuses everything even if the policy says otherwise.
+static void test_empty_allowlist_fails_closed(void) {
+  CanBusProfile p = makeValid();
+  p.access        = AccessPolicy::kReadWrite;
+  p.bus.mode      = BusMode::kNormal;
+  p.txAllow.count = 0;
+  TEST_ASSERT_TRUE(allowsTransmit(p));
+  TEST_ASSERT_FALSE(mayTransmitId(p, 0x100));  // fail closed
+  const char *why;
+  TEST_ASSERT_FALSE(validate(p, &why));        // and it is a config error
+}
+
+static void test_jbd_allowlist_covers_only_its_ids(void) {
+  const CanBusProfile *p = findProfile("jbd-sp24s");
+  TEST_ASSERT_TRUE(mayTransmitId(*p, 0x100));
+  TEST_ASSERT_TRUE(mayTransmitId(*p, 0x110));
+  TEST_ASSERT_FALSE(mayTransmitId(*p, 0x0FF));
+  TEST_ASSERT_FALSE(mayTransmitId(*p, 0x111));
+}
+
+// --------------------------- Activa profiles --------------------------------
+
+static void test_activa_profiles_are_present_and_honest(void) {
+  for (const char *key : {"activa-listen", "activa-obd11", "activa-obd29"}) {
+    const CanBusProfile *p = findProfile(key);
+    TEST_ASSERT_NOT_NULL_MESSAGE(p, key);
+    // The bitrate is still a guess, so nothing here may claim to be measured.
+    TEST_ASSERT_EQUAL_INT((int)Provenance::kUnverified, (int)p->device.provenance);
+    TEST_ASSERT_EQUAL_INT((int)DeviceClass::kVehicleEcu, (int)p->device.deviceClass);
+    // The vehicle carries one terminator; the module's 120R must stay fitted.
+    TEST_ASSERT_TRUE(p->bus.expectsExternalTermination);
+  }
+
+  const CanBusProfile *o11 = findProfile("activa-obd11");
+  TEST_ASSERT_EQUAL_INT((int)Interaction::kIsoTp, (int)o11->protocol.interaction);
+  TEST_ASSERT_EQUAL_INT((int)FrameFormat::kStandard11, (int)o11->bus.frameFormat);
+  TEST_ASSERT_EQUAL_UINT32(0x7DF, o11->protocol.requestId);
+  TEST_ASSERT_EQUAL_UINT32(0x7E8, o11->protocol.responseId);
+
+  const CanBusProfile *o29 = findProfile("activa-obd29");
+  TEST_ASSERT_EQUAL_INT((int)FrameFormat::kExtended29, (int)o29->bus.frameFormat);
+  TEST_ASSERT_EQUAL_UINT32(0x18DB33F1, o29->protocol.requestId);
+  TEST_ASSERT_EQUAL_UINT32(0x18DAF110, o29->protocol.responseId);
+}
+
+// Every candidate bitrate in the probe order must actually be reachable.
+static void test_every_probe_bitrate_resolves(void) {
+  for (const char *key : {"sniff-500k", "sniff-250k", "sniff-1m", "sniff-125k"}) {
+    const CanBusProfile *p = findProfile(key);
+    TEST_ASSERT_NOT_NULL_MESSAGE(p, key);
+    BitTiming t;
+    TEST_ASSERT_TRUE_MESSAGE(resolveTiming(*p, t), key);
+    TEST_ASSERT_EQUAL_UINT32(p->bus.bitrate, t.actualBitrate);
+  }
+}
+
+// ------------------------- runtime selection --------------------------------
+
+static void test_active_profile_is_runtime_selectable(void) {
+  TEST_ASSERT_EQUAL_STRING("jbd-sp24s", active().device.key);  // first entry
+
+  TEST_ASSERT_TRUE(setActive("activa-listen"));
+  TEST_ASSERT_EQUAL_STRING("activa-listen", active().device.key);
+  TEST_ASSERT_TRUE(activeWasChosen());
+
+  TEST_ASSERT_FALSE(setActive("does-not-exist"));
+  TEST_ASSERT_EQUAL_STRING("activa-listen", active().device.key);  // unchanged
+
+  TEST_ASSERT_FALSE(setActiveIndex(profileCount()));
+  TEST_ASSERT_TRUE(setActiveIndex(0));
+  TEST_ASSERT_EQUAL_STRING("jbd-sp24s", active().device.key);
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_timing_matches_esp_idf_canonical_configs);
@@ -209,6 +329,14 @@ int main(int, char **) {
   RUN_TEST(test_registry_lookup);
   RUN_TEST(test_jbd_profile_matches_what_was_measured);
   RUN_TEST(test_sniffer_profiles_are_passive);
+  RUN_TEST(test_obd11_transmit_allowlist);
+  RUN_TEST(test_obd29_mask_pins_the_fixed_bytes);
+  RUN_TEST(test_listen_profiles_transmit_nothing);
+  RUN_TEST(test_empty_allowlist_fails_closed);
+  RUN_TEST(test_jbd_allowlist_covers_only_its_ids);
+  RUN_TEST(test_activa_profiles_are_present_and_honest);
+  RUN_TEST(test_every_probe_bitrate_resolves);
+  RUN_TEST(test_active_profile_is_runtime_selectable);
   UNITY_END();
   return 0;
 }

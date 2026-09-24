@@ -7,6 +7,8 @@
 #include <Arduino.h>
 
 #include "app_config.h"
+#include "can/active_profile.h"
+#include "can/can_profile_registry.h"
 #include "jbd_can_link.h"
 #include "jbd_uart_link.h"
 #include "ring_sink.h"
@@ -52,6 +54,43 @@ void holdWhile(bool condition, status::Token &tok, status::Token (*show)()) {
   }
 }
 
+// Every profile is compiled in unconditionally, so this is the whole catalogue
+// the firmware could switch to at runtime - a DIP switch, a serial command, a
+// UI. Printing it at boot makes that visible rather than implied.
+void dumpProfiles() {
+  Serial.printf("\n# CAN profiles compiled in: %u\n", static_cast<unsigned>(can::profileCount()));
+  Serial.printf("#  %-3s %-15s %-9s %-10s %-19s %-18s %-11s %s\n",
+                "idx", "key", "bitrate", "format", "interaction", "access", "provenance", "tx");
+  for (size_t i = 0; i < can::profileCount(); ++i) {
+    const can::CanBusProfile *p = can::profileAt(i);
+    if (p == nullptr) continue;
+    Serial.printf("#  %-3u %-15s %-9lu %-10s %-19s %-18s %-11s %u rule(s)%s\n",
+                  static_cast<unsigned>(i), p->device.key,
+                  static_cast<unsigned long>(p->bus.bitrate),
+                  can::toString(p->bus.frameFormat), can::toString(p->protocol.interaction),
+                  can::toString(p->access), can::toString(p->device.provenance),
+                  p->txAllow.count, p->bus.expectsExternalTermination ? "  [needs 120R]" : "");
+  }
+
+  const char *badKey = nullptr, *reason = nullptr;
+  const size_t bad = can::validateAll(&badKey, &reason);
+  if (bad)
+    Serial.printf("#  !! %u profile(s) INVALID, first: %s - %s\n", static_cast<unsigned>(bad),
+                  badKey ? badKey : "?", reason ? reason : "?");
+  else
+    Serial.printf("#  all profiles validate\n");
+
+  const can::CanBusProfile &a = can::active();
+  can::BitTiming t;
+  Serial.printf("# active profile : %s (%s)%s\n", a.device.key, a.device.displayName,
+                can::activeWasChosen() ? "" : "  [default, nothing selected it]");
+  if (can::resolveTiming(a, t))
+    Serial.printf("#   timing        : brp %lu tseg1 %u tseg2 %u sjw %u -> %lu bit/s @ %u%%\n",
+                  static_cast<unsigned long>(t.brp), t.tseg1, t.tseg2, t.sjw,
+                  static_cast<unsigned long>(t.actualBitrate), t.actualSamplePointPercent);
+  Serial.printf("#   may transmit  : %s\n", can::allowsTransmit(a) ? "yes" : "NO (passive)");
+}
+
 void reportLink(const jbd::IBmsLink *link) {
   jbd::LinkStats st;
   link->stats(st);
@@ -90,6 +129,7 @@ void setup() {
   for (jbd::IBmsSink *sink : g_sinks) Serial.printf("# sink %s\n", sink->name());
   Serial.printf("# telemetry ring: %u slots, RAM only, cleared on boot\n",
                 static_cast<unsigned>(app::telemetry().capacity()));
+  dumpProfiles();
 
   if (!allUp)
     status::show_link_init_failed();

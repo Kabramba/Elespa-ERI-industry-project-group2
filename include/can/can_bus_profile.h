@@ -16,6 +16,7 @@
 // on the third, so the transport belongs in the profile.
 #pragma once
 
+#include <stddef.h>   // size_t, for kMaxTxRules
 #include <stdint.h>
 
 #include "can/can_timing.h"
@@ -59,6 +60,27 @@ enum class AccessPolicy : uint8_t {
   kListenOnly,       // transmit nothing, ever
   kReadOnlyQueries,  // only the read requests the profile declares
   kReadWrite,        // writes allowed - must be opted into deliberately
+};
+
+// ------------------------------------------------- transmit permissions
+
+// One permitted transmit pattern. An id is allowed when it falls in
+// [first, last] AND, if mask is non-zero, agrees with `first` on the masked
+// bits. The mask exists for patterns a plain range cannot express - OBD-II's
+// 29-bit physical requests are 0x18DAxxF1, where the low byte is fixed.
+struct TxRule {
+  uint32_t first = 0;
+  uint32_t last  = 0;
+  uint32_t mask  = 0;  // 0 = range only
+};
+
+constexpr size_t kMaxTxRules = 4;
+
+// Fail closed: an empty allowlist permits nothing, whatever the access policy
+// says. A profile that may transmit must state exactly what.
+struct TxAllowlist {
+  TxRule  rules[kMaxTxRules] = {};
+  uint8_t count              = 0;
 };
 
 // ------------------------------------------------------------ metadata
@@ -137,6 +159,7 @@ struct CanBusProfile {
   BusConfig      bus;
   ProtocolConfig protocol;
   AccessPolicy   access = AccessPolicy::kListenOnly;  // safe default
+  TxAllowlist    txAllow = {};                        // empty = transmit nothing
 };
 
 // --------------------------------------------------------------- utilities
@@ -151,6 +174,11 @@ const char *toString(Provenance v);
 
 // May this profile transmit at all?
 bool allowsTransmit(const CanBusProfile &p);
+
+// May this profile transmit THIS id? Every transmit path must go through here.
+// Returns false when the profile cannot transmit at all, when the allowlist is
+// empty, and when the id matches no rule - three independent ways to say no.
+bool mayTransmitId(const CanBusProfile &p, uint32_t id);
 
 // Is `id` one the device is expected to answer on?
 bool respondsOnId(const CanBusProfile &p, uint32_t id);

@@ -199,19 +199,55 @@ All profiles live in one `constexpr` array in
 [`src/can/can_profile_registry.cpp`](src/can/can_profile_registry.cpp) — no RAM,
 no persistence, everything visible in one file. Adding a device is one entry.
 
-| Key | Device | Notes |
-|---|---|---|
-| `jbd-sp24s` | JBD SP24S007 BMS | every value measured on the bench |
-| `sniff-500k` | generic 500 k sniffer | listen-only, ACKs nothing |
-| `sniff-250k` | generic 250 k sniffer | listen-only, ACKs nothing |
+| Key | Device | Interaction | Provenance |
+|---|---|---|---|
+| `jbd-sp24s` | JBD SP24S007 BMS | remote-frame query | **measured** |
+| `activa-listen` | Honda Activa 6G ECU | broadcast listen | unverified |
+| `activa-obd11` | Honda Activa 6G ECU | ISO-TP, 11-bit | unverified |
+| `activa-obd29` | Honda Activa 6G ECU | ISO-TP, 29-bit | unverified |
+| `sniff-500k` / `-250k` / `-1m` / `-125k` | any | broadcast listen | measured |
 
-The sniffers transmit **nothing at all** — not even an ACK — which makes them
-the safe way onto a bus you do not own. Use them to discover the Daly's and the
-Activa's parameters before writing profiles for those.
+**Every profile is compiled in unconditionally.** Nothing is `#ifdef`'d out, so
+a DIP switch, a serial command or a UI can switch devices at runtime without
+reflashing — see `can/active_profile.h`. The whole table costs about 5 KB of a
+6.5 MB app partition.
 
-Daly and OBD-II are deliberately **absent rather than guessed**; the registry
-comments record what each will need. `validateAll()` checks every entry and is
-worth calling once at boot.
+The listen-only entries transmit **nothing at all** — not even an ACK — which
+makes them the only safe way onto a bus you do not own. `validateAll()` checks
+every entry and runs at boot.
+
+### Honda Activa 6G — read this before connecting
+
+Measured facts are in [`docs/activa-can.md`](docs/activa-can.md). The short
+version:
+
+- **CAN-H = Yellow/Black, CAN-L = Yellow/Red, GND = Green** on the 6-pin red
+  DLC. Polarity was deduced from ISO 15031-3, not confirmed — if a bitrate that
+  should work yields only error frames, swap the two yellow wires.
+- **Never connect Brown** (SCS — grounding it puts the ECU into service mode)
+  **or Orange** (K-line at ~12 V, would destroy a GPIO).
+- CAN-H↔CAN-L measures **124 Ω** with all nodes connected, so the vehicle has
+  only one terminator and the DLC is the open end. **The SN65HVD230's onboard
+  120 Ω stays fitted** — the profiles flag this as `expectsExternalTermination`.
+- The **bitrate is still unknown**, which is exactly why all three Activa
+  profiles are marked `kUnverified` rather than `kMeasured`. Start with
+  `activa-listen`, then the other sniffers in order 250 k → 1 M → 125 k.
+
+The transmit rules from that document are enforced in data, not convention.
+`activa-obd11` permits `0x7DF` and `0x7E0–0x7E7` and nothing else;
+`activa-obd29` uses a mask so only `0x18DAxxF1` and `0x18DB33F1` pass. Every
+transmit path must go through `mayTransmitId()`, which fails closed three
+separate ways: no transmit permission, empty allowlist, or no matching rule.
+
+### Not built yet
+
+- **ISO-TP transport.** The Activa profiles describe it; nothing speaks it. A
+  segmentation layer (First/Consecutive/Flow Control) is needed before either
+  OBD profile can do anything.
+- **Bitrate probe.** Listen at each candidate rate, count valid frames versus
+  bus errors. Safe to build — it never transmits.
+- **Daly BMS.** Absent rather than guessed: it needs a reference document like
+  the Activa's, with the real bitrate, frame format and request/response ids.
 
 ## CAN transmission mode
 
