@@ -186,6 +186,12 @@ typing, and with no arguments it lists the ports that exist right now.
 `--http-port N` moves the web port, `--no-browser` suppresses the auto-open,
 `-l FILE` appends the raw stream to a log. Ctrl-C stops it.
 
+**Reflashing while the dashboard is open:** click **release port**. The
+dashboard holds the serial port exclusively, so `pio run -t upload` otherwise
+fails with *"multiple access on port"* — Linux does not lock a tty, so esptool
+and the dashboard both open it and race for the bootloader handshake. The button
+drops the port for 25 seconds and reconnects by itself; no restart needed.
+
 The page shows a card per PID with the live value, its rate of change over a
 one-second window, and a chart of recent history, plus the raw serial stream and
 link statistics. Charts are drawn on a canvas by hand and nothing is fetched

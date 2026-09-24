@@ -87,6 +87,31 @@ class RawLog:
             return self.total, list(self._lines)[-behind:]
 
 
+class PortControl:
+    """Lets the UI hand the serial port back for a moment.
+
+    The dashboard holds the port exclusively, so a reflash fails with "multiple
+    access on port" until it lets go. Rather than making that a stop-and-restart
+    ritual, the reader drops the port on request and reconnects by itself.
+    """
+
+    def __init__(self):
+        self._until = 0.0
+        self._lock = threading.Lock()
+
+    def request(self, seconds):
+        with self._lock:
+            self._until = time.monotonic() + seconds
+
+    def held_off(self):
+        with self._lock:
+            return time.monotonic() < self._until
+
+    def remaining(self):
+        with self._lock:
+            return max(0.0, self._until - time.monotonic())
+
+
 class Decoder:
     def __init__(self):
         self.values = {}      # pid -> (value, unit, name, monotonic time)
@@ -234,9 +259,14 @@ class Decoder:
             }
 
 
-def reader_thread(port, baud, dec, raw, stop, logfile):
-    """Owns the serial port. Reconnects on its own if the board is replugged."""
+def reader_thread(port, baud, dec, raw, stop, logfile, ctl):
+    """Owns the serial port. Reconnects on its own if the board is replugged, or
+    after the UI has released the port for a reflash."""
     while not stop.is_set():
+        if ctl.held_off():
+            dec.connected = False
+            time.sleep(0.25)
+            continue
         try:
             ser = serial.Serial(port, baud, timeout=0.2)
         except serial.SerialException as e:
@@ -251,6 +281,9 @@ def reader_thread(port, baud, dec, raw, stop, logfile):
         raw.append(f"## connected to {port} @ {baud}")
         buf = b""
         while not stop.is_set():
+            if ctl.held_off():
+                raw.append(f"## released {port} for {ctl.remaining():.0f}s - flash now")
+                break
             try:
                 chunk = ser.read(4096)
             except serial.SerialException as e:
@@ -275,7 +308,7 @@ def reader_thread(port, baud, dec, raw, stop, logfile):
             pass
 
 
-def build_app(dec, raw, port_name):
+def build_app(dec, raw, port_name, ctl):
     app = FastAPI(title="Activa ECU dashboard")
     html_path = Path(__file__).with_name("dashboard.html")
 
@@ -288,6 +321,11 @@ def build_app(dec, raw, port_name):
         dec.reset_history()
         return {"ok": True}
 
+    @app.post("/api/release")
+    async def release(seconds: int = 25):
+        ctl.request(seconds)
+        return {"ok": True, "seconds": seconds}
+
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
         await sock.accept()
@@ -298,6 +336,7 @@ def build_app(dec, raw, port_name):
                 payload = dec.snapshot()
                 payload["raw"] = lines
                 payload["port"] = port_name
+                payload["released"] = round(ctl.remaining(), 1)
                 await sock.send_text(json.dumps(payload))
                 await asyncio.sleep(0.25)
         except (WebSocketDisconnect, RuntimeError, ConnectionError):
@@ -318,11 +357,12 @@ def main():
 
     dec = Decoder()
     raw = RawLog()
+    ctl = PortControl()
     stop = threading.Event()
     logfile = open(args.log, "a") if args.log else None
 
     t = threading.Thread(target=reader_thread,
-                         args=(args.port, args.baud, dec, raw, stop, logfile),
+                         args=(args.port, args.baud, dec, raw, stop, logfile, ctl),
                          daemon=True)
     t.start()
 
@@ -334,7 +374,7 @@ def main():
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
-    app = build_app(dec, raw, args.port)
+    app = build_app(dec, raw, args.port, ctl)
     try:
         uvicorn.run(app, host="127.0.0.1", port=args.http_port, log_level="warning")
     except KeyboardInterrupt:

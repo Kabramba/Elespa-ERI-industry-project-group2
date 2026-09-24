@@ -75,6 +75,7 @@
   <h1>Activa ECU</h1>
   <button id="btnreset">reset charts</button>
   <button id="btnpause">pause raw</button>
+  <button id="btnrelease" title="Let go of the serial port so you can reflash">release port</button>
   <div class="ident">
     <span>VIN <b id="vin">—</b></span>
     <span>ECU <b id="ecu">—</b></span>
@@ -113,6 +114,7 @@ $("btnpause").onclick = () => {
   $("btnpause").textContent = paused ? "resume raw" : "pause raw";
 };
 $("btnreset").onclick = () => fetch("/api/reset", {method:"POST"});
+$("btnrelease").onclick = () => fetch("/api/release?seconds=25", {method:"POST"});
 
 // Small hand-drawn line chart. No chart library: this has to work in a garage
 // with no internet, so nothing is loaded from a CDN.
@@ -200,7 +202,10 @@ function connect(){
         ? "no scaling: " + s.undecoded.join(" ") : "";
 
     const b = $("banner");
-    if (s.error)        { b.className="show"; b.textContent = "⚠ " + s.error; }
+    if (s.released > 0) { b.className="show";
+        b.textContent = `⏏ port released for ${s.released.toFixed(0)}s — flash now, `
+                      + `the dashboard reconnects on its own`; }
+    else if (s.error)   { b.className="show"; b.textContent = "⚠ " + s.error; }
     else if (!s.connected){ b.className="show"; b.textContent = "⚠ serial not connected — retrying…"; }
     else if (!s.ok)     { b.className="show";
         b.textContent = s.mode
