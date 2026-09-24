@@ -17,9 +17,18 @@ void reset(VehicleSnapshot &s) {
 }
 
 bool addSample(VehicleSnapshot &s, uint8_t pid, const uint8_t *data, uint8_t len) {
-  if (s.sampleCount >= kMaxPidSamples) return false;
   if (len > 4) len = 4;
-  PidSample &e = s.samples[s.sampleCount++];
+
+  // Upsert. A snapshot is the latest known value for every PID seen, so a fast
+  // poll of a few PIDs refreshes those without discarding the rest.
+  PidSample *slot = nullptr;
+  for (uint8_t i = 0; i < s.sampleCount && i < kMaxPidSamples; ++i)
+    if (s.samples[i].pid == pid) { slot = &s.samples[i]; break; }
+  if (slot == nullptr) {
+    if (s.sampleCount >= kMaxPidSamples) return false;
+    slot = &s.samples[s.sampleCount++];
+  }
+  PidSample &e = *slot;
   e.pid        = pid;
   e.len        = len;
   memset(e.data, 0, sizeof(e.data));

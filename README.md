@@ -171,6 +171,30 @@ that never arrived. `computeDerived()` honours `cellsReadMask`, so a partial
 cell read reports `cellsRead < cellCount` and its sum/min/max cover only the
 channels actually received.
 
+## Live dashboard
+
+```bash
+./tools/activa_dashboard.py /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B5E083130-if00
+```
+
+The port is a required argument. `q` quits, `r` resets history, `p` pauses the
+raw pane; `-l FILE` also appends the raw stream to a log.
+
+Division of labour: **the firmware emits frames, the dashboard decodes them.**
+`esp32s3_activa_obd` prints only two line shapes —
+
+```
+# KEY value...                       metadata
+R (12.345678) 18DAF110#03410C1A2C    a frame; T transmitted, R received
+```
+
+— and Python does ISO-TP reassembly, PID decoding, deltas, sparklines and the
+raw view. Strip the direction character and the frame lines are candump text,
+so a capture pastes straight into SavvyCAN or python-can.
+
+It requires `# MODE activa-obd` and says so plainly rather than silently
+misreading another application's output.
+
 ## CAN bus profiles
 
 A `CanBusProfile` is everything needed to bring up one device's bus, plus who is
