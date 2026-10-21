@@ -156,8 +156,8 @@ static void test_truncated_and_oversized_buffers_are_rejected(void) {
 
 static void test_wrong_schema_version_is_rejected(void) {
   uint8_t buf[256];
-  const size_t n = encode(PacketType::kVehicle, SourceId::kEcu, 1, 0, 0,
-                          VehicleTelemetry{}, buf, sizeof(buf));
+  const size_t n = encode(PacketType::kNavigation, SourceId::kEcu, 1, 0, 0,
+                          NavigationTelemetry{}, buf, sizeof(buf));
   buf[2] = kSchemaVersion + 1;   // a future producer we cannot parse
   TEST_ASSERT_FALSE(verify(buf, n));
 }
@@ -190,6 +190,93 @@ static void test_crc_check_value(void) {
   TEST_ASSERT_EQUAL_HEX16(0x4B37, c);
 }
 
+// Latitude and longitude must survive at full precision. A float carries ~7
+// significant digits, which at two or three digits of whole degrees leaves
+// metres of error - the classic GPS-in-float bug. Scaled int32 is exact.
+static void test_position_keeps_centimetre_precision(void) {
+  NavigationTelemetry nav{};
+  nav.latitudeE7  =  188166667;   // 18.8166667 N
+  nav.longitudeE7 =  733133333;   // 73.3133333 E
+  nav.fields      = kNavPosition;
+
+  uint8_t buf[512];
+  const size_t n = encode(PacketType::kNavigation, SourceId::kSensorGroup1, 7, 0, 0,
+                          nav, buf, sizeof(buf));
+  TEST_ASSERT_TRUE(verify(buf, n));
+  const auto *out = (const NavigationTelemetry *)payloadOf(buf, n);
+  TEST_ASSERT_EQUAL_INT32(188166667, out->latitudeE7);   // bit-exact
+  TEST_ASSERT_EQUAL_INT32(733133333, out->longitudeE7);
+
+  // The same value through a float would not survive.
+  const float viaFloat = 18.8166667f;
+  TEST_ASSERT_TRUE(fabs((double)viaFloat - 18.8166667) > 1e-8);
+}
+
+// Dynamics is the highest-rate source in the system; nine summarised channels
+// is what makes it transmissible at all.
+static void test_dynamics_carries_nine_stat_channels(void) {
+  DynamicsTelemetry d{};
+  RunningStat r;
+  r.reset(0);
+  for (int i = 0; i < 200; ++i) r.push(1.0f + 0.01f * (i % 7), i * 5u);
+  d.accelX = d.accelY = d.accelZ = r.snapshot();
+  d.fields = kDynAccel;
+
+  uint8_t buf[512];
+  const size_t n = encode(PacketType::kDynamics, SourceId::kSensorGroup1, 1, 0, 0, d,
+                          buf, sizeof(buf));
+  TEST_ASSERT_TRUE(verify(buf, n));
+  const auto *out = (const DynamicsTelemetry *)payloadOf(buf, n);
+  TEST_ASSERT_EQUAL_UINT16(200, out->accelX.samples);   // 200 samples -> 6 numbers
+  TEST_ASSERT_TRUE(out->accelX.stddev > 0.0f);
+}
+
+// A status packet reports edges, so a consumer can act on a fault that appeared
+// and cleared between two periodic samples.
+static void test_status_event_mask(void) {
+  StatusEventTelemetry st{};
+  st.batteryProtectionFlags = kProtCellUv;
+  st.eventMask = kEvBatteryFault | kEvRfidPresented;
+  st.rfidUidLength = 4;
+  st.rfidUid[0] = 0xA1; st.rfidUid[1] = 0xB2;
+  st.rfidUid[2] = 0xC3; st.rfidUid[3] = 0xD4;
+  st.rfidAuthorised = 1;
+  st.fields = kStBattery | kStRfid;
+
+  uint8_t buf[256];
+  const size_t n = encode(PacketType::kStatusEvent, SourceId::kFusion, 1, 0, 0, st, buf,
+                          sizeof(buf));
+  TEST_ASSERT_TRUE(verify(buf, n));
+  const auto *out = (const StatusEventTelemetry *)payloadOf(buf, n);
+  TEST_ASSERT_TRUE(out->eventMask & kEvBatteryFault);
+  TEST_ASSERT_TRUE(out->eventMask & kEvRfidPresented);
+  TEST_ASSERT_FALSE(out->eventMask & kEvMotorFault);
+  TEST_ASSERT_EQUAL_UINT8(4, out->rfidUidLength);
+  TEST_ASSERT_EQUAL_HEX8(0xD4, out->rfidUid[3]);
+}
+
+// Every type must round-trip, so none is accidentally unencodable.
+static void test_all_seven_types_round_trip(void) {
+  uint8_t buf[512];
+  struct Case { PacketType t; uint16_t bytes; };
+  const Case cases[] = {
+      {PacketType::kIdentity, sizeof(IdentityTelemetry)},
+      {PacketType::kEngine, sizeof(EngineTelemetry)},
+      {PacketType::kMotor, sizeof(MotorTelemetry)},
+      {PacketType::kDynamics, sizeof(DynamicsTelemetry)},
+      {PacketType::kNavigation, sizeof(NavigationTelemetry)},
+      {PacketType::kBattery, sizeof(BatteryTelemetry)},
+      {PacketType::kStatusEvent, sizeof(StatusEventTelemetry)},
+  };
+  uint8_t zeros[512] = {0};
+  for (const Case &c : cases) {
+    const size_t n = encode(c.t, SourceId::kFusion, 1, 0, 0, zeros, c.bytes, buf,
+                            sizeof(buf));
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(kHeaderBytes + c.bytes, n, toString(c.t));
+    TEST_ASSERT_TRUE_MESSAGE(verify(buf, n), toString(c.t));
+  }
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_welford_matches_hand_computed_statistics);
@@ -203,6 +290,10 @@ int main(int, char **) {
   RUN_TEST(test_wrong_schema_version_is_rejected);
   RUN_TEST(test_field_mask_distinguishes_absent_from_zero);
   RUN_TEST(test_crc_check_value);
+  RUN_TEST(test_position_keeps_centimetre_precision);
+  RUN_TEST(test_dynamics_carries_nine_stat_channels);
+  RUN_TEST(test_status_event_mask);
+  RUN_TEST(test_all_seven_types_round_trip);
   UNITY_END();
   return 0;
 }

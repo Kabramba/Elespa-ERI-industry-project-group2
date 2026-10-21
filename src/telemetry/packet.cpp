@@ -65,24 +65,26 @@ const void *payloadOf(const uint8_t *buf, size_t length) {
 
 const char *toString(PacketType t) {
   switch (t) {
-    case PacketType::kIdentity: return "identity";
-    case PacketType::kEngine:   return "engine";
-    case PacketType::kVehicle:  return "vehicle";
-    case PacketType::kBattery:  return "battery";
-    case PacketType::kMotor:    return "motor";
-    case PacketType::kIotGroup: return "iot-group1";
+    case PacketType::kIdentity:    return "identity";
+    case PacketType::kEngine:      return "engine";
+    case PacketType::kMotor:       return "motor";
+    case PacketType::kDynamics:    return "dynamics";
+    case PacketType::kNavigation:  return "navigation";
+    case PacketType::kBattery:     return "battery";
+    case PacketType::kStatusEvent: return "status-event";
   }
   return "?";
 }
 
 const char *toString(SourceId s) {
   switch (s) {
-    case SourceId::kUnknown:  return "unknown";
-    case SourceId::kEcu:      return "ecu";
-    case SourceId::kBatteryA: return "battery-a";
-    case SourceId::kBatteryB: return "battery-b";
-    case SourceId::kMotor:    return "motor";
-    case SourceId::kIotGroup: return "iot-group1";
+    case SourceId::kUnknown:      return "unknown";
+    case SourceId::kEcu:          return "ecu";
+    case SourceId::kBatteryA:     return "battery-a";
+    case SourceId::kBatteryB:     return "battery-b";
+    case SourceId::kMotorDriver:  return "motor-driver";
+    case SourceId::kSensorGroup1: return "sensor-group1";
+    case SourceId::kFusion:       return "fusion";
   }
   return "?";
 }

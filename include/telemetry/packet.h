@@ -20,26 +20,30 @@
 namespace telemetry {
 
 constexpr uint16_t kMagic         = 0xE15A;  // "ELSA"
-constexpr uint8_t  kSchemaVersion = 1;
+constexpr uint8_t  kSchemaVersion = 2;
 
 // Wire identifiers. Values are frozen once published - append, never renumber.
+// Seven groups, numbered by domain: 0x0x identity, 0x1x motion and powertrain,
+// 0x2x energy, 0x3x discrete state. Values are frozen once published.
 enum class PacketType : uint8_t {
-  kIdentity = 0x01,  // static, on change or once per minute
-  kEngine   = 0x10,  // ECU, engine-related, fast channels summarised
-  kVehicle  = 0x11,  // ECU, not engine-related
-  kBattery  = 0x20,  // BMS, vendor-independent
-  kMotor    = 0x30,  // RESERVED - motor controller, future scope
-  kIotGroup = 0x40,  // RESERVED - partner group's sensor set
+  kIdentity    = 0x01,  // static        on change, or once a minute
+  kEngine      = 0x10,  // ICE powertrain      1 Hz, fast channels summarised
+  kMotor       = 0x11,  // electric powertrain 1 Hz, fast channels summarised
+  kDynamics    = 0x12,  // IMU + wheel         1 Hz, the highest-rate source
+  kNavigation  = 0x13,  // GPS + barometric + odometry   1 Hz
+  kBattery     = 0x20,  // BMS, vendor-independent       1 Hz
+  kStatusEvent = 0x30,  // faults, DTCs, RFID, presence  on change
 };
 
 // Which subsystem produced the packet, so a consumer can tell two batteries apart.
 enum class SourceId : uint8_t {
-  kUnknown  = 0,
-  kEcu      = 1,
-  kBatteryA = 2,
-  kBatteryB = 3,
-  kMotor    = 4,
-  kIotGroup = 5,
+  kUnknown      = 0,
+  kEcu          = 1,  // Honda Activa engine ECU, OBD-II over CAN
+  kBatteryA     = 2,  // JBD BMS
+  kBatteryB     = 3,  // Daly BMS
+  kMotorDriver  = 4,  // Votol EM-30S
+  kSensorGroup1 = 5,  // partner group's sensor board
+  kFusion       = 6,  // a packet combining more than one source
 };
 
 enum HeaderFlag : uint8_t {
