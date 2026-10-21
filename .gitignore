@@ -11,6 +11,10 @@ compile_commands.json
 *.a
 *.elf
 
+# python bytecode
+__pycache__/
+*.pyc
+
 # editor scratch
 *.swp
 *~
