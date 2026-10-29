@@ -79,3 +79,44 @@
 #ifndef STATUS_LED_ENABLED
 #define STATUS_LED_ENABLED 1
 #endif
+
+// ===========================================================================
+// Telemetry packet output
+// ===========================================================================
+//
+// Where encoded packets go. The schema itself is transport-agnostic - see
+// telemetry/packet.h - so this only picks the pipe.
+//
+//   0 - USB serial (the same port as the monitor). Needs no wiring, which is
+//       what makes a bare-board bring-up possible, but the port then carries
+//       BINARY COBS frames and the text-line dashboard cannot share it.
+//
+//   1 - a second hardware UART on TELEMETRY_UART_TX_PIN. This is the real
+//       deliverable: packets leave on their own pins and the USB port stays
+//       free for human-readable diagnostics.
+#ifndef TELEMETRY_OUTPUT_UART1
+#define TELEMETRY_OUTPUT_UART1 0
+#endif
+
+// GPIO15/16 are free on the DevKitC-1: 17/18 are the JBD UART, 4/5 the CAN
+// transceiver, 43/44 the USB bridge, 48 the status LED.
+#ifndef TELEMETRY_UART_TX_PIN
+#define TELEMETRY_UART_TX_PIN 15
+#endif
+#ifndef TELEMETRY_UART_RX_PIN
+#define TELEMETRY_UART_RX_PIN 16
+#endif
+
+// 115200 keeps a 324-byte packet under 30 ms on the wire. The largest packet at
+// 1 Hz uses about 2.3 % of the link, so there is ample headroom for the whole
+// seven-packet set plus the partner group's 200 Hz channels arriving as
+// StatBlocks.
+#ifndef TELEMETRY_UART_BAUD
+#define TELEMETRY_UART_BAUD 115200
+#endif
+
+// Depth of the producer-to-transmitter queue, in packets. Eight costs about
+// 2.6 kB of SRAM.
+#ifndef TELEMETRY_QUEUE_DEPTH
+#define TELEMETRY_QUEUE_DEPTH 8
+#endif
