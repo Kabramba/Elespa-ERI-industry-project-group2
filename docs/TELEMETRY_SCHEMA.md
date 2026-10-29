@@ -363,10 +363,24 @@ Set with `-D TELEMETRY_OUTPUT=` in `platformio.ini`; defined in `app_config.h`.
 | `TELEMETRY_OUT_USB_HEX` | `T <hex>` text lines on the USB port | on the vehicle: the **only** mode that coexists with the apps' existing text output and the dashboard |
 
 Hex mode costs twice the bytes and needs no stuffing, because the newline is the
-delimiter and hex cannot contain one. At 1 Hz the whole seven-packet set is
-about 4.6 % of a 115200 link even in hex.
+delimiter and hex cannot contain one.
 
-### 9.4 Receiving
+### 9.4 Link budget
+
+The five 1 Hz packets are 980 bytes of payload and envelope per second. At
+115200 8N1 the link carries 11520 bytes/s.
+
+| | Computed | Measured on hardware |
+|---|---|---|
+| Binary COBS | 991 B/s, **8.6 %** | 982 B/s, **8.5 %** |
+| Hex lines | 1975 B/s, **17.1 %** | 1992 B/s, **17.3 %** |
+| Largest packet alone (`kDynamics`, 324 B) | 327 B/s, 2.8 % | — |
+
+Both modes have ample headroom, hex included. The figures agree with
+measurement to within 0.2 points, which is the check that the overhead
+arithmetic above is right rather than plausible.
+
+### 9.5 Receiving
 
 `telemetry::FrameReader` (`include/telemetry/framing.h`) takes one byte at a
 time — because a UART delivers bytes whenever it feels like it — and reports

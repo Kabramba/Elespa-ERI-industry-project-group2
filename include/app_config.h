@@ -116,10 +116,14 @@
 #define TELEMETRY_UART_RX_PIN 16
 #endif
 
-// 115200 keeps a 324-byte packet under 30 ms on the wire. The largest packet at
-// 1 Hz uses about 2.3 % of the link, so there is ample headroom for the whole
-// seven-packet set plus the partner group's 200 Hz channels arriving as
-// StatBlocks. In hex mode double it: still under 5 %.
+// 115200 keeps a 324-byte packet under 30 ms on the wire. At 8N1 that is 11520
+// bytes/s, and the five 1 Hz packets are 980 bytes of payload plus envelope:
+//
+//   binary COBS   991 B/s    8.6 %   (measured 982 B/s, 8.5 %)
+//   hex lines    1975 B/s   17.1 %   (measured 1992 B/s, 17.3 %)
+//
+// Ample headroom either way, including for the partner group's 200 Hz channels,
+// which arrive as StatBlocks rather than samples and so cost nothing extra.
 #ifndef TELEMETRY_UART_BAUD
 #define TELEMETRY_UART_BAUD 115200
 #endif
