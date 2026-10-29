@@ -4,10 +4,15 @@ The project's spine is **acquisition → preprocessing → telemetry packets**.
 Everything downstream — the SBC, the models, whatever comes after — consumes
 packets and nothing else. This document is the contract.
 
-Transmission medium is out of scope. These are byte layouts; what carries them
-later (UART, Wi-Fi, LoRa, shared memory) changes nothing here.
+The **payload layouts** are medium-independent: they are byte layouts, and what
+carries them — UART, Wi-Fi, LoRa, shared memory — changes nothing about them.
+A link still needs framing, so §9 defines one, and §10 is the firmware API that
+produces it. Nothing in §§1–8 depends on either.
 
-Code: `include/telemetry/` · `src/telemetry/` · tests in `test/test_telemetry/`
+Code: `include/telemetry/` · `src/telemetry/`
+Tests: `test/test_telemetry/`, `test/test_framing/`, `test/test_publisher/`,
+`test/test_mappers/` — 57 host tests, no hardware
+Host decoder: `tools/telemetry_decode.py`
 
 ---
 
@@ -293,7 +298,7 @@ cap in `docs/activa-can.md`; a 60 ms gap gives ~16 requests/s. Sending RPM faste
 than 8 Hz would transmit interpolation, not measurement — which is the whole
 argument for statistics over raw samples.
 
-## 8. Using a packet
+## 8. Consuming a packet
 
 ```c
 if (!telemetry::verify(buf, n)) return;          // magic, version, length, CRC
@@ -314,7 +319,229 @@ Both guards matter. `fields` says the producer intended to populate the channel;
 `samples > 0` says it actually got data. They disagree when a poll cycle fails
 partway, which on a lossy CAN link is routine.
 
-## 9. Changing this schema
+---
+
+## 9. Wire format
+
+### 9.1 Why the magic number is not enough
+
+A packet carries magic `0xE15A`, but **a magic number cannot delimit a binary
+stream**. The payload is arbitrary bytes, so a cell-voltage pair or a float's
+mantissa will eventually contain `5A E1` by chance; a reader hunting for the
+magic locks onto the middle of a packet and stays out of step. A reader needs a
+byte that *cannot* occur inside a frame.
+
+### 9.2 COBS
+
+[Consistent Overhead Byte Stuffing](https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuffing)
+removes every zero byte from the encoded body, which makes `0x00` an
+unambiguous frame delimiter.
+
+```
+  [ COBS( header | payload ) ] [ 0x00 ]
+```
+
+| Property | Value |
+|---|---|
+| Overhead | 1 byte per 254 bytes, plus 1 leading code byte, plus the delimiter |
+| Worst case, largest packet | 324 → 327 bytes, **0.9 %** |
+| Resynchronisation after corruption | at most one frame, *by construction* |
+
+The constant overhead is the reason for choosing it over the byte-doubling
+schemes (SLIP, PPP), whose worst case is 2× and whose buffer sizing is therefore
+a guess. COBS detects nothing — the header CRC still does the integrity check.
+COBS only establishes where a frame begins and ends.
+
+### 9.3 Output modes
+
+Set with `-D TELEMETRY_OUTPUT=` in `platformio.ini`; defined in `app_config.h`.
+
+| Mode | What goes on the wire | Use |
+|---|---|---|
+| `TELEMETRY_OUT_UART1_COBS` | binary frames on GPIO15, 115200 8N1 | **the deliverable** — packets on their own link, USB free for diagnostics |
+| `TELEMETRY_OUT_USB_COBS` | binary frames on the USB port | bare-board bring-up; nothing human-readable may share the port |
+| `TELEMETRY_OUT_USB_HEX` | `T <hex>` text lines on the USB port | on the vehicle: the **only** mode that coexists with the apps' existing text output and the dashboard |
+
+Hex mode costs twice the bytes and needs no stuffing, because the newline is the
+delimiter and hex cannot contain one. At 1 Hz the whole seven-packet set is
+about 4.6 % of a 115200 link even in hex.
+
+### 9.4 Receiving
+
+`telemetry::FrameReader` (`include/telemetry/framing.h`) takes one byte at a
+time — because a UART delivers bytes whenever it feels like it — and reports
+only packets that are both well-framed and pass `verify()`. It separates two
+counters on purpose:
+
+- `framingErrors()` — COBS could not decode. **Bytes were lost.**
+- `crcErrors()` — decoded cleanly, failed the CRC. **Bytes were altered.**
+
+Those are different physical faults with different fixes, and a single "error"
+count would conflate them.
+
+---
+
+## 10. Firmware API
+
+```
+  fill a payload struct
+          │
+          ▼
+  Publisher::publish(type, source, payload, flags)   ← sequence, clock, CRC
+          │
+          ▼
+  QueueSink ──> PacketQueue<8>        ← the IPC hop; publish never blocks
+          │
+          ▼  pumpTelemetryOutput()  from loop()
+  CobsFrameSink / HexLinePacketSink
+          │
+          ▼
+  StreamByteWriter ──> UART
+```
+
+### 10.1 Publishing
+
+```c
+app::beginTelemetryOutput();                       // once, in setup()
+
+telemetry::BatteryTelemetry b = {};
+telemetry::toBatteryTelemetry(snapshot, b);        // mapper, pure
+app::telemetryPublisher().publish(
+    telemetry::PacketType::kBattery,
+    telemetry::SourceId::kBatteryA, b);
+
+app::pumpTelemetryOutput(2);                       // every loop() iteration
+```
+
+No application builds a header by hand. `Publisher` owns the **per-source**
+sequence counters, stamps the producer clock, and computes the CRC.
+
+### 10.2 Why a queue on a single-threaded loop
+
+Writing a 324-byte packet at 115200 baud takes about **28 ms**. An OBD cycle
+that stalls that long misses its reply window and starts losing PIDs. So
+`publish()` only enqueues; `pumpTelemetryOutput()` drains at whatever rate the
+UART will take. Overflow is newest-wins — the oldest queued packet is dropped —
+and every drop is counted, so falling behind is visible rather than silent.
+
+The queue is also the seam for a second task: it is guarded by `util::SpinLock`,
+so a producer on one core and a transmitter on the other is already safe.
+
+### 10.3 Sequence numbers
+
+Per source, 16-bit, wrapping. At 1 Hz that is 18 hours, so **a consumer must
+compare with wrapping arithmetic, not `>`**.
+
+Two packet types from the same source share one counter — `kDynamics` and
+`kNavigation` both come from `kSensorGroup1`, so they interleave as 12, 13, 14,
+15. A gap detector keyed on *(source, type)* instead of *source* reports a false
+gap on every packet. This is a real mistake that was made and fixed in
+`tools/telemetry_decode.py`.
+
+A refused packet still consumes its sequence number, so the loss is visible
+downstream instead of the stream silently renumbering itself.
+
+### 10.4 Mappers
+
+`include/telemetry/mappers.h` converts acquisition types into schema types.
+They are kept separate deliberately: `jbd::BmsSnapshot` is shaped by **the
+device** — 17 channels because that is how the BMS is configured — while
+`BatteryTelemetry` is shaped by **the consumer**. Collapsing them would push
+every device quirk downstream forever.
+
+Everything there is pure and host-tested, because a mapping bug produces a
+perfectly well-formed packet that says the wrong thing: invisible on the wire,
+catchable only in a test.
+
+- `toBatteryTelemetry()` returns **false** when the pack has more configured
+  channels than the schema carries. Not hypothetical — the bench JBD is set to
+  17 on a 16S pack — so the caller is told rather than quietly shipping 16 of 17.
+- `EngineAccumulator` folds ~8 Hz sweeps into `StatBlock`s and flushes once a
+  second. An empty window returns false rather than publishing a packet of NaN.
+- `StatusTracker` holds the previous discrete state, because deciding that a DTC
+  *appeared* needs to know what was there before. Only a **newly raised**
+  protection bit is a fault event; one that cleared is good news.
+
+### 10.5 The protection-word assertion
+
+`jbd::Protection` and `telemetry::BatteryProtection` are bit-for-bit identical,
+which makes that mapping a straight copy. That is a coincidence of two
+independent definitions, so `src/telemetry/mappers.cpp` asserts all thirteen
+pairs at compile time. Renumber either side and the build breaks — instead of a
+short circuit arriving as an over-temperature, which is the kind of bug that
+gets believed.
+
+---
+
+## 11. Reading packets on a host
+
+`tools/telemetry_decode.py` is the reference consumer. Dependency-free apart
+from pyserial, and deliberately a **second, independent statement of the
+schema** rather than a generic parser.
+
+```bash
+tools/telemetry_decode.py /dev/ttyACM0                  # live
+tools/telemetry_decode.py capture.bin --file            # saved stream
+tools/telemetry_decode.py /dev/ttyACM0 --json           # one object per line
+tools/telemetry_decode.py /dev/ttyACM0 --types battery  # just one type
+tools/telemetry_decode.py /dev/ttyACM0 --raw out.bin    # tee the bytes
+```
+
+Both wire forms are read automatically, with no flag: binary COBS and `T <hex>`
+lines are distinguishable, because hex text contains no `0x00` and a COBS body
+will not begin a line with `T `.
+
+### 11.1 The cross-language contract test
+
+Two descriptions of the same bytes drift, and the failure is silent — a wrong
+offset shifts every field after it and they all still look plausible.
+
+```bash
+tools/check_decoder.py
+```
+
+`tools/make_golden_capture.cpp` writes a stream of all seven packets **from the
+real C++ structs** with known values; `check_decoder.py` asserts the Python
+decoder reports those exact values back, and also checks the stream reassembly
+rules. The fixture is committed at `test/fixtures/golden_capture.bin`.
+
+This caught two genuine bugs on its first run: a navigation format string one
+float short, and three identity fields never read.
+
+---
+
+## 12. Proving the pipeline without hardware
+
+Every other application needs something on the other end — a BMS, or a vehicle
+with its ignition on — which makes the transport hard to bring up, because a
+silent link could be the wiring, the ECU, the protocol or the packet layer with
+no way to tell them apart.
+
+```bash
+pio run -e esp32s3_selftest -t upload
+tools/telemetry_decode.py /dev/ttyACM0
+```
+
+`esp32s3_selftest` removes all of it. It publishes synthetic packets of all
+seven types, never brings a CAN controller up, and is therefore safe whatever
+the board is plugged into. If the decoder reads them, the pipeline is proven and
+any later silence is upstream of it.
+
+**Every packet it emits carries `kFlagSimulated`.** The values come from a sine
+wave, not a vehicle. That flag is the difference between a test fixture and a
+fabricated reading.
+
+Measured on an ESP32-S3-DevKitC-1 with nothing attached:
+
+| | |
+|---|---|
+| Binary COBS on USB | 101 packets, 0 framing errors, 0 CRC rejects, 0 gaps, 20.3 s |
+| Hex lines on USB | 36 packets, 0 errors, interleaved with `#` diagnostics |
+| Footprint | 22.4 kB RAM (6.8 %), 290 kB flash (4.4 %) |
+
+---
+
+## 13. Changing this schema
 
 - **Adding** a field inside existing reserved bytes, or a new `PacketType`: safe.
   Every payload is padded to a round size with spare bytes for exactly this.
@@ -322,13 +549,20 @@ partway, which on a lossy CAN link is routine.
   breaking. Increment `kSchemaVersion` — consumers reject an unknown version
   rather than misparsing it.
 
+Either way, run `tools/check_decoder.py`. A C++ change that the Python decoder
+has not followed fails there rather than in the field.
+
 **v1 → v2** merged the former `kVehicle` into `kNavigation` and `kStatusEvent`,
 promoted `kMotor` from reserved, and added `kDynamics` and `kNavigation` for the
 sensor board. v1 was never consumed externally.
 
-## 10. Test coverage
+---
 
-`test/test_telemetry/` — 15 tests, host only, no hardware:
+## 14. Test coverage
+
+**113 host tests across nine suites, no hardware.** Run with `pio test -e native`.
+
+`test/test_telemetry/` — 15 tests, statistics and the envelope:
 
 - Welford against a hand-computed dataset (mean 5, σ 2.13809)
 - numerical stability at a large mean with small spread, the RPM case
@@ -344,7 +578,51 @@ sensor board. v1 was never consumed externally.
 - StatusEvent edge mask and variable-length RFID UID
 - **all seven packet types round-trip**, so none is accidentally unencodable
 
-## 11. Open items
+`test/test_framing/` — 11 tests, the wire format:
+
+- COBS round-trips for empty, all-zero, no-zero and magic-bearing payloads
+- the **254-byte run boundary**, where an off-by-one corrupts every frame
+  longer than 254 bytes — which is most real packets
+- encode refuses rather than writing partially, at every buffer size
+- decode rejects a zero inside a body, an overrunning run, a leading zero code
+- a reader **resynchronises after garbage**, the property that justifies COBS
+- a corrupted payload counts as a CRC error, *not* a framing error
+- an overlong frame is counted once, not once per excess byte
+- idle delimiters are not errors
+- a stream of five packets is read in order
+
+`test/test_publisher/` — 13 tests, the publish path:
+
+- sequence numbers independent per source
+- a refusing sink is counted, and still consumes its sequence number
+- oversized payloads rejected before the sink is called
+- queue order, overflow dropping the **oldest**, and counted drops
+- `pop()` into an undersized buffer leaves the packet queued
+- publish → COBS → bytes → `FrameReader` → byte-identical payload
+- a short write reports failure rather than sending a torn frame
+- all seven types through the whole path
+- fan-out reports the worst result, so a dead transport cannot hide
+
+`test/test_mappers/` — 18 tests, acquisition → schema:
+
+- the 0 mV dead tap marked **absent**, not zero, and excluded from the spread
+- 17 configured channels into a 16-wide schema flagged to the caller
+- absent field groups stay clear; nothing invents a zero
+- temperatures to tenths with a presence mask
+- the non-standard OBD byte `0x25` carried verbatim
+- fixed-size strings always NUL-terminated
+- windowed statistics, window reset, empty window not published
+- first status reading reported **without** claiming an edge
+- unchanged state publishes nothing
+- DTC appeared / cleared, MIL toggle, MOSFET change
+- only a **newly raised** protection bit is a fault
+- a battery poll that read nothing stays silent
+
+Plus `tools/check_decoder.py` for the C++ ↔ Python contract.
+
+---
+
+## 15. Open items
 
 | Item | Owner | Blocks |
 |---|---|---|
@@ -354,3 +632,4 @@ sensor board. v1 was never consumed externally.
 | Torque source, or accept current-derived | us | `MotorTelemetry.torqueNm` |
 | Whether `simulated` data is marked at source | group 1 | trust of early datasets |
 | Scope: Elespa's document reportedly excludes "CAN bus communication" and "battery management" | **confirm with Elespa** | framing of the deliverable |
+| A second task for the transmitter, if the loop ever stalls | us | nothing yet; the queue is already thread-safe |

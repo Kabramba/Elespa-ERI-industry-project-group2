@@ -57,6 +57,14 @@ include/                 public headers
     packets.h            THE PUBLISHED SCHEMA - seven payload structs
     packet.h             the 16-byte envelope: magic, version, seq, CRC
     stat_block.h         StatBlock + Welford running statistics
+    framing.h            COBS + the resynchronising stream reader
+    publisher.h          THE API - publish(), the sinks, the fan-out
+    packet_queue.h       the producer-to-transmitter hop
+    mappers.h            acquisition types -> schema payloads
+    output.h             the assembled output chain, per app_config.h
+    byte_writer.h        IByteWriter, the seam that makes it host-testable
+    stream_writer.h      the Arduino adapter (the only untestable part)
+    battery_packet_sink.h  an IBmsSink that publishes packets
   bms_types.h            BmsSnapshot - the battery data model
   bms_link.h             IBmsLink    - a source of telemetry
   bms_sink.h             IBmsSink    - a consumer of telemetry
@@ -77,6 +85,7 @@ src/
     main_jbd.cpp           JBD BMS over UART + CAN
     main_activa_probe.cpp  LISTEN ONLY bitrate probe
     main_activa_obd.cpp    OBD-II reader, machine-readable output
+    main_telemetry_selftest.cpp  the packet pipeline, no hardware needed
   bms_types.cpp          derived statistics, naming
   jbd_protocol.cpp       pure decode        <- no Arduino, host-testable
   crc16.cpp              pure, with a continuation form for split buffers
@@ -96,12 +105,21 @@ test/
   test_can_profile/      timing solver, validation rules, registry
   test_obd/              ISO-TP reassembly, the request allowlist
   test_telemetry/        envelope round-trip, CRC rejection, statistics
+  test_framing/          COBS, the 254-byte boundary, resynchronisation
+  test_publisher/        sequencing, queue overflow, the whole path
+  test_mappers/          acquisition -> schema, absent vs zero, edges
+
+tools/
+  telemetry_decode.py    the reference host consumer
+  check_decoder.py       C++ <-> Python contract test
+  make_golden_capture.cpp  writes the fixture from the real structs
+  activa_dashboard.py    the web dashboard
 ```
 
 Plus `docs/` (bring-up notes) and `reference/` (frozen sketches, superseded
 files). `tools/serial_read.py` still does bounded non-interactive captures.
 
-All six suites run on the host: **71 tests in about two seconds, no board.**
+All nine suites run on the host: **113 tests in about four seconds, no board.**
 
 ## How it fits together
 
@@ -160,10 +178,78 @@ Three rules the schema does not bend on:
   with Welford's algorithm, and an absent channel reports `NaN` with
   `samples == 0` so it can never be mistaken for a plausible zero.
 
-Full field-by-field reference, including the provenance of every value and
-which source supplies it: **[`docs/TELEMETRY_SCHEMA.md`](docs/TELEMETRY_SCHEMA.md)**.
-The 17 ECU values and their units are in
-[`docs/ECU_schema.md`](docs/ECU_schema.md).
+### Getting a packet onto a wire
+
+A magic number cannot delimit a binary stream — a payload will eventually
+contain `5A E1` by chance — so frames are **COBS**-encoded, which removes every
+zero byte and makes `0x00` an unambiguous delimiter. Overhead is 3 bytes on the
+largest packet (0.9 %), and resynchronisation after corruption costs at most one
+frame *by construction*.
+
+Three output modes, set with `-D TELEMETRY_OUTPUT=` per environment:
+
+| Mode | Wire | Use |
+|---|---|---|
+| `TELEMETRY_OUT_UART1_COBS` | binary on GPIO15 | **the deliverable** — own link, USB left free |
+| `TELEMETRY_OUT_USB_COBS` | binary on USB | bare-board bring-up, no text may share the port |
+| `TELEMETRY_OUT_USB_HEX` | `T <hex>` lines on USB | on the vehicle — the only mode that coexists with the dashboard |
+
+### The API
+
+```cpp
+app::beginTelemetryOutput();                      // once, in setup()
+
+telemetry::BatteryTelemetry b = {};
+telemetry::toBatteryTelemetry(snapshot, b);       // pure, host-tested mapper
+app::telemetryPublisher().publish(
+    telemetry::PacketType::kBattery,
+    telemetry::SourceId::kBatteryA, b);
+
+app::pumpTelemetryOutput(2);                      // every loop() iteration
+```
+
+No application builds a header by hand. `Publisher` owns the per-source
+sequence counters, the clock and the CRC; `publish()` only enqueues, because a
+324-byte write at 115200 baud takes 28 ms and an OBD cycle that stalls that long
+starts losing PIDs.
+
+### Proving it with nothing attached
+
+Every other app needs a BMS or a running vehicle on the other end, which makes
+the transport hard to bring up: a silent link could be the wiring, the ECU, the
+protocol or the packet layer.
+
+```bash
+pio run -e esp32s3_selftest -t upload     # safe on any bus: never opens a CAN controller
+tools/telemetry_decode.py /dev/ttyACM0
+```
+
+```
+  17.044  engine     ecu            #16  [simulated] rpm 1502 (min 1480 max 1520 sd 2.50 n=8)  map 70.50 kPa
+  17.044  battery    battery_a      #17  [simulated] 53.40 V  -2.20 A  soc 42%  spread 15 mV  cells 15/17
+  17.046  dynamics   sensor_group_1 #33  [simulated] ax 0.020 az 1.000 g  n=40  window 200 ms
+```
+
+Measured on a bare board: **101 packets, 0 framing errors, 0 CRC rejects, 0
+sequence gaps** over 20 s. Every packet carries `kFlagSimulated` — the values
+come from a sine wave, not a vehicle.
+
+### Reading them on a host
+
+```bash
+tools/telemetry_decode.py /dev/ttyACM0 --json      # one object per line
+tools/telemetry_decode.py /dev/ttyACM0 --types battery
+tools/check_decoder.py                             # C++ <-> Python contract test
+```
+
+`tools/telemetry_decode.py` states the schema a second time, in Python. Two
+descriptions of the same bytes drift silently, so `check_decoder.py` generates a
+capture from the **real C++ structs** and asserts the decoder reports those
+exact values back. It caught two real bugs on its first run.
+
+Full field-by-field reference, the wire format, the API and the rate budget:
+**[`docs/TELEMETRY_SCHEMA.md`](docs/TELEMETRY_SCHEMA.md)**. The 17 ECU values
+and their units are in [`docs/ECU_schema.md`](docs/ECU_schema.md).
 
 ## The telemetry rings
 
