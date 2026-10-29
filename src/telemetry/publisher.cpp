@@ -63,4 +63,27 @@ bool CobsFrameSink::onPacket(const uint8_t *packet, size_t length) {
   return true;
 }
 
+bool HexLinePacketSink::onPacket(const uint8_t *packet, size_t length) {
+  if (packet == nullptr || length == 0 || length > kMaxPacketBytes) return false;
+
+  static const char kHex[] = "0123456789abcdef";
+  size_t            n      = 0;
+  line_[n++]               = 'T';
+  line_[n++]               = ' ';
+  for (size_t i = 0; i < length; ++i) {
+    line_[n++] = kHex[packet[i] >> 4];
+    line_[n++] = kHex[packet[i] & 0x0F];
+  }
+  line_[n++] = '\n';
+
+  // One write, like the COBS sink: a line torn in half by another task's output
+  // is a line no reader can parse.
+  if (writer_.write(reinterpret_cast<const uint8_t *>(line_), n) != n) {
+    ++shortWrites_;
+    return false;
+  }
+  ++written_;
+  return true;
+}
+
 }  // namespace telemetry

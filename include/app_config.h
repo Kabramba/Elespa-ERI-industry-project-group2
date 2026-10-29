@@ -87,15 +87,24 @@
 // Where encoded packets go. The schema itself is transport-agnostic - see
 // telemetry/packet.h - so this only picks the pipe.
 //
-//   0 - USB serial (the same port as the monitor). Needs no wiring, which is
-//       what makes a bare-board bring-up possible, but the port then carries
-//       BINARY COBS frames and the text-line dashboard cannot share it.
+//   0  USB-COBS. Binary frames on the same port as the monitor. Needs no
+//      wiring, which is what makes a bare-board bring-up possible, but the
+//      port then carries binary and no text may share it.
 //
-//   1 - a second hardware UART on TELEMETRY_UART_TX_PIN. This is the real
-//       deliverable: packets leave on their own pins and the USB port stays
-//       free for human-readable diagnostics.
-#ifndef TELEMETRY_OUTPUT_UART1
-#define TELEMETRY_OUTPUT_UART1 0
+//   1  UART1-COBS. Binary frames on their own pins. THIS IS THE DELIVERABLE:
+//      packets leave on a dedicated link and the USB port stays free for
+//      human-readable diagnostics.
+//
+//   2  USB-HEX. One text line per packet, "T <hex>". Costs twice the bytes and
+//      is the only mode that COEXISTS with the text protocols the live apps
+//      already emit, so the dashboard keeps working and packets are visible on
+//      the single USB cable. Use it for bring-up on the vehicle.
+#define TELEMETRY_OUT_USB_COBS   0
+#define TELEMETRY_OUT_UART1_COBS 1
+#define TELEMETRY_OUT_USB_HEX    2
+
+#ifndef TELEMETRY_OUTPUT
+#define TELEMETRY_OUTPUT TELEMETRY_OUT_USB_COBS
 #endif
 
 // GPIO15/16 are free on the DevKitC-1: 17/18 are the JBD UART, 4/5 the CAN
@@ -110,7 +119,7 @@
 // 115200 keeps a 324-byte packet under 30 ms on the wire. The largest packet at
 // 1 Hz uses about 2.3 % of the link, so there is ample headroom for the whole
 // seven-packet set plus the partner group's 200 Hz channels arriving as
-// StatBlocks.
+// StatBlocks. In hex mode double it: still under 5 %.
 #ifndef TELEMETRY_UART_BAUD
 #define TELEMETRY_UART_BAUD 115200
 #endif

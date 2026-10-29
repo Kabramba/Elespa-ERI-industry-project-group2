@@ -13,6 +13,11 @@ of silently shifting every field.
     tools/telemetry_decode.py /dev/ttyACM0 --json     # one JSON object a line
     tools/telemetry_decode.py /dev/ttyACM0 --raw capture.bin   # tee the bytes
 
+Both wire forms are read automatically, with no flag to set:
+
+    binary    COBS-encoded frames delimited by 0x00 - the dedicated link
+    text      "T <hex>" one line per packet - shares a port with diagnostics
+
 Schema version 2. Little-endian, which is native on the ESP32-S3 and on any
 x86/ARM host, so '<' here and a memcpy there describe the same bytes.
 """
@@ -63,6 +68,30 @@ def cobs_decode(frame: bytes) -> bytes | None:
         i += run
         if code != 0xFF and i < n:
             out.append(0)
+    return bytes(out)
+
+
+def cobs_encode_for_test(data: bytes) -> bytes:
+    """COBS encode, without the trailing delimiter.
+
+    The decoder never needs to encode - the firmware does that. This exists so
+    the tests can build a frame whose body deliberately contains awkward bytes.
+    """
+    out = bytearray()
+    run = bytearray()
+    for byte in data:
+        if byte == 0:
+            out.append(len(run) + 1)
+            out += run
+            run = bytearray()
+        else:
+            run.append(byte)
+            if len(run) == 254:
+                out.append(0xFF)
+                out += run
+                run = bytearray()
+    out.append(len(run) + 1)
+    out += run
     return bytes(out)
 
 
@@ -530,6 +559,71 @@ def summarise(pkt: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# StreamParser - reassembling packets from a byte stream
+# ---------------------------------------------------------------------------
+
+
+class StreamParser:
+    """Feeds bytes in, yields decoded packets out.
+
+    Reads both wire forms at once. The two parsers consume bytes INDEPENDENTLY,
+    which is the subtle part: a newline ends a text line but is an ordinary data
+    byte inside a COBS frame, because COBS excludes only 0x00. If the text
+    branch swallowed it, one byte would vanish from every binary frame that
+    happened to contain a newline, and that frame would then fail its CRC with
+    nothing to show why.
+    """
+
+    MAX_BUFFER = 8192
+
+    def __init__(self):
+        self.cobs = bytearray()   # COBS body in progress
+        self.line = bytearray()   # text line in progress
+        self.framing_errors = 0
+        self.verify_errors = 0
+
+    def feed(self, chunk: bytes):
+        """Yield one decoded packet dict per complete, verified packet."""
+        for byte in chunk:
+            body = None
+
+            if byte == DELIMITER:
+                # Ends a COBS frame, and cannot occur inside a text line.
+                frame, self.cobs = bytes(self.cobs), bytearray()
+                self.line = bytearray()
+                if not frame:
+                    continue
+                body = cobs_decode(frame)
+                if body is None:
+                    self.framing_errors += 1
+                    continue
+            else:
+                if len(self.cobs) < self.MAX_BUFFER:
+                    self.cobs.append(byte)
+
+                if byte != 0x0A:
+                    if len(self.line) < self.MAX_BUFFER:
+                        self.line.append(byte)
+                    continue
+
+                # Ends a text line. The COBS buffer already holds this byte.
+                text, self.line = bytes(self.line), bytearray()
+                if not text.startswith(b"T "):
+                    continue  # a diagnostic line, or binary noise; not ours
+                try:
+                    body = bytes.fromhex(text[2:].strip().decode("ascii"))
+                except (ValueError, UnicodeDecodeError):
+                    self.framing_errors += 1
+                    continue
+
+            pkt = decode_packet(body)
+            if pkt is None:
+                self.verify_errors += 1
+                continue
+            yield pkt
+
+
+# ---------------------------------------------------------------------------
 # Byte sources
 # ---------------------------------------------------------------------------
 
@@ -575,8 +669,9 @@ def main() -> int:
     )
     tee = open(args.raw, "wb") if args.raw else None
 
-    buf = bytearray()
-    stats = {"accepted": 0, "framing": 0, "crc": 0, "bytes": 0}
+    parser = StreamParser()
+    accepted = 0
+    total_bytes = 0
     seen_seq: dict[str, int] = {}
     gaps = 0
     started = time.time()
@@ -586,45 +681,24 @@ def main() -> int:
 
     try:
         for chunk in source:
-            stats["bytes"] += len(chunk)
+            total_bytes += len(chunk)
             if tee:
                 tee.write(chunk)
                 tee.flush()
 
-            for byte in chunk:
-                if byte != DELIMITER:
-                    if len(buf) < 4096:
-                        buf.append(byte)
-                    continue
+            for pkt in parser.feed(chunk):
+                accepted += 1
 
-                frame, buf = bytes(buf), bytearray()
-                if not frame:
-                    continue
-
-                body = cobs_decode(frame)
-                if body is None:
-                    stats["framing"] += 1
-                    continue
-
-                pkt = decode_packet(body)
-                if pkt is None:
-                    stats["crc"] += 1
-                    continue
-
-                stats["accepted"] += 1
-
-                # Sequence numbers are per SOURCE, not per source-and-type:
-                # two packet types from one source share the counter, so keying
-                # this on the type would report a gap on every packet. A real
-                # gap means loss between the board and here, which is worth
-                # knowing separately from a CRC failure - one is loss, one is
-                # corruption.
-                key = pkt["source"]
-                prev = seen_seq.get(key)
+                # Sequence numbers are per SOURCE, not per source-and-type: two
+                # packet types from one source share the counter, so keying this
+                # on the type would report a gap on every packet. A real gap
+                # means loss between the board and here, which is worth knowing
+                # separately from a CRC failure - one is loss, one is corruption.
+                prev = seen_seq.get(pkt["source"])
                 if prev is not None and pkt["seq"] != (prev + 1) & 0xFFFF:
                     gaps += 1
                     pkt["gap_after_seq"] = prev
-                seen_seq[key] = pkt["seq"]
+                seen_seq[pkt["source"]] = pkt["seq"]
 
                 if wanted and pkt["type"] not in wanted:
                     continue
@@ -643,8 +717,9 @@ def main() -> int:
                     if "error" in pkt:
                         print(f"           ERROR {pkt['error']}", flush=True)
 
-                if args.count and stats["accepted"] >= args.count:
+                if args.count and accepted >= args.count:
                     raise KeyboardInterrupt
+
             if args.seconds and time.time() - started > args.seconds:
                 raise KeyboardInterrupt
     except KeyboardInterrupt:
@@ -655,12 +730,12 @@ def main() -> int:
 
     elapsed = time.time() - started
     print(
-        f"\n# {stats['accepted']} packets, {stats['framing']} framing errors, "
-        f"{stats['crc']} CRC/header rejects, {gaps} sequence gaps, "
-        f"{stats['bytes']} bytes in {elapsed:.1f} s",
+        f"\n# {accepted} packets, {parser.framing_errors} framing errors, "
+        f"{parser.verify_errors} CRC/header rejects, {gaps} sequence gaps, "
+        f"{total_bytes} bytes in {elapsed:.1f} s",
         file=sys.stderr,
     )
-    return 0 if stats["accepted"] else 1
+    return 0 if accepted else 1
 
 
 if __name__ == "__main__":

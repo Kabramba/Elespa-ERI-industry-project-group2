@@ -16,6 +16,8 @@
 #include "status_led.h"
 #include "summary_consumer.h"
 #include "telemetry.h"
+#include "telemetry/battery_packet_sink.h"
+#include "telemetry/output.h"
 
 namespace {
 
@@ -28,10 +30,17 @@ jbd::JbdCanLink  g_can;
 app::RingSink   g_ringSink{app::telemetryProducer()};
 app::SerialSink g_serialSink;
 
+// The published schema. This is the deliverable path: every snapshot becomes a
+// kBattery packet on the telemetry link, and a kStatusEvent when the discrete
+// state changes. It is an IBmsSink like any other consumer.
+telemetry::BatteryPacketSink g_packetSink{app::telemetryPublisher(),
+                                          telemetry::SourceId::kBatteryA,
+                                          telemetry::BatteryVendor::kJbd};
+
 // Both links feed the same ring; BmsSnapshot::source says which produced each
 // entry, so a consumer can filter or cross-check.
 jbd::IBmsLink *g_links[] = {&g_uart, &g_can};
-jbd::IBmsSink *g_sinks[] = {&g_ringSink, &g_serialSink};
+jbd::IBmsSink *g_sinks[] = {&g_ringSink, &g_serialSink, &g_packetSink};
 
 uint32_t g_lastPoll = 0;
 uint32_t g_cycle    = 0;
@@ -116,7 +125,11 @@ void setup() {
   status::begin(STATUS_LED_BRIGHTNESS_PERCENT);
   status::show_boot();
 
+  app::beginTelemetryOutput();
+
   Serial.printf("\n# esp32-jbd telemetry bridge\n");
+  Serial.printf("# schema v%u, packets out on %s\n", telemetry::kSchemaVersion,
+                app::telemetryOutputName());
   Serial.printf("# CAN mode      : %s\n", g_can.modeName());
   Serial.printf("# LED brightness: %u %%\n", status::led().brightness());
 
@@ -143,6 +156,10 @@ void loop() {
   // Every iteration: the LED's blink phase and claim expiry are driven here.
   status::tick();
 
+  // And the telemetry queue is drained here, not at publish time, so a UART
+  // write never blocks the poll loop.
+  app::pumpTelemetryOutput(2);
+
   if (millis() - g_lastPoll < kPollPeriodMs) {
     delay(2);
     return;
@@ -164,6 +181,10 @@ void loop() {
     if (!link->poll(s)) {
       Serial.printf("[%s] no reading this cycle\n", link->name());
       reportLink(link);
+      // The discrete state is no longer known to be current, so the next
+      // reading should be reported as news rather than compared against a
+      // stale baseline.
+      g_packetSink.linkLost();
       if (!isCan) status::show_error_state50();  // UART timeout
       continue;
     }

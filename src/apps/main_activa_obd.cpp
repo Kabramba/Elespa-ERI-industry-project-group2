@@ -26,6 +26,9 @@
 #include "obd/obd_isotp.h"
 #include "obd/vehicle_types.h"
 #include "status_led.h"
+#include "telemetry/mappers.h"
+#include "telemetry/output.h"
+#include "telemetry/packets.h"
 #include "telemetry.h"
 
 namespace {
@@ -49,6 +52,18 @@ constexpr uint32_t kFullSweepEvery = 120;
 // pyserial flushes the input buffer on open - so a one-shot banner is missed
 // and the client waits forever for a mode line that already went past.
 constexpr uint32_t kMetaEvery = 16;
+
+// The published schema. Fast ECU channels are accumulated across sweeps and
+// summarised once a second; identity is static so it goes out as an occasional
+// keepalive; status events go out only when the discrete state changes.
+constexpr uint32_t kEnginePacketMs   = 1000;
+constexpr uint32_t kIdentityPacketMs = 60000;
+
+telemetry::EngineAccumulator g_engineAcc;
+telemetry::StatusTracker     g_statusTracker;
+uint32_t                     g_lastEnginePacket   = 0;
+uint32_t                     g_lastIdentityPacket = 0;
+bool                         g_engineAccStarted   = false;
 
 bool               g_txLatchedOff = false;
 uint32_t           g_lastTxMs     = 0;
@@ -216,9 +231,13 @@ void setup() {
   delay(300);
   status::begin(STATUS_LED_BRIGHTNESS_PERCENT);
   status::show_boot();
+  app::beginTelemetryOutput();
+
   // The dashboard looks for this line and refuses to run without it.
   Serial.printf("\n# MODE activa-obd\n");
   Serial.printf("# SAFETY read-only-services-01-02-03-07-09-0A-only\n");
+  Serial.printf("# SCHEMA v%u out=%s\n", telemetry::kSchemaVersion,
+                app::telemetryOutputName());
 }
 
 void loop() {
@@ -319,21 +338,30 @@ void loop() {
       const uint8_t q = supported[i];
       if ((q & 0x1F) == 0) continue;  // page markers
       uint8_t      r[64];
+      g_engineAcc.noteRequest();
       const size_t rn = ask(0x01, &q, 1, r, sizeof(r), &acked);
-      if (rn >= 2 && r[0] == 0x41)
+      if (rn >= 2 && r[0] == 0x41) {
+        g_engineAcc.noteReply();
         obd::addSample(snap, q, (rn > 2) ? &r[2] : nullptr, static_cast<uint8_t>(rn - 2));
+      }
       status::tick();
     }
   } else {
     uint8_t r[16];
     uint8_t q  = kHotPid;
+    g_engineAcc.noteRequest();
     size_t  rn = ask(0x01, &q, 1, r, sizeof(r), &acked);
-    if (rn >= 2 && r[0] == 0x41)
+    if (rn >= 2 && r[0] == 0x41) {
+      g_engineAcc.noteReply();
       obd::addSample(snap, q, (rn > 2) ? &r[2] : nullptr, static_cast<uint8_t>(rn - 2));
+    }
     q  = kRotating[cycle % kRotatingCount];
+    g_engineAcc.noteRequest();
     rn = ask(0x01, &q, 1, r, sizeof(r), &acked);
-    if (rn >= 2 && r[0] == 0x41)
+    if (rn >= 2 && r[0] == 0x41) {
+      g_engineAcc.noteReply();
       obd::addSample(snap, q, (rn > 2) ? &r[2] : nullptr, static_cast<uint8_t>(rn - 2));
+    }
   }
 
   obd::decodeAll(snap);
@@ -341,9 +369,49 @@ void loop() {
   snap.valid    = true;
   app::vehicleTelemetryProducer().publish(snap);
 
+  // ---------------- published packets ----------------
+  //
+  // The ring above holds the raw sweep for anything on this board that wants
+  // it. These are the packets that leave the board, in the published schema.
+  const uint32_t nowMs = millis();
+  if (!g_engineAccStarted) {
+    g_engineAcc.reset(nowMs);
+    g_engineAccStarted   = true;
+    g_lastEnginePacket   = nowMs;
+    g_lastIdentityPacket = nowMs - kIdentityPacketMs;  // send one immediately
+  }
+  g_engineAcc.push(snap, nowMs);
+
+  telemetry::Publisher &pub = app::telemetryPublisher();
+
+  if (nowMs - g_lastEnginePacket >= kEnginePacketMs) {
+    g_lastEnginePacket = nowMs;
+    telemetry::EngineTelemetry e = {};
+    if (g_engineAcc.flush(e, nowMs)) {
+      pub.publish(telemetry::PacketType::kEngine, telemetry::SourceId::kEcu, e);
+    }
+  }
+
+  if (nowMs - g_lastIdentityPacket >= kIdentityPacketMs) {
+    g_lastIdentityPacket = nowMs;
+    telemetry::IdentityTelemetry id = {};
+    telemetry::toIdentityTelemetry(snap, id);
+    id.batteryBitrate = 0;  // no BMS on this build
+    pub.publish(telemetry::PacketType::kIdentity, telemetry::SourceId::kEcu, id);
+  }
+
+  telemetry::StatusEventTelemetry st = {};
+  if (g_statusTracker.update(snap, st)) {
+    pub.publish(telemetry::PacketType::kStatusEvent, telemetry::SourceId::kEcu, st);
+  }
+
+  app::pumpTelemetryOutput(3);
+
   if ((cycle % kMetaEvery) == 0) {
     const app::VehicleRing &ring = app::vehicleTelemetry();
     Serial.printf("# MODE activa-obd\n");
+    Serial.printf("# SCHEMA v%u out=%s\n", telemetry::kSchemaVersion,
+                  app::telemetryOutputName());
     Serial.printf("# LINK %lu %s\n", static_cast<unsigned long>(snap.bitrate),
                   snap.extendedAddressing ? "29bit" : "11bit");
     Serial.printf("# VIN %s\n# ECU %s\n# CAL %s\n# CVN %08lX\n", snap.vin, snap.ecuName,

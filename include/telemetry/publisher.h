@@ -172,4 +172,33 @@ class CobsFrameSink final : public IPacketSink {
   uint32_t     shortWrites_           = 0;
 };
 
+// ---------------------------------------------------------------------------
+// HexLinePacketSink - packets as text, so they can share a port with text.
+// ---------------------------------------------------------------------------
+//
+// Writes one line per packet: "T " then the packet in lowercase hex, then a
+// newline. Twice the bytes of COBS and no use at all on a dedicated link - but
+// it is the only form that can be interleaved with the line-oriented
+// diagnostics the live apps already print. On a vehicle, where there is one USB
+// cable and the dashboard is watching it, that matters more than the overhead.
+//
+// The newline is the delimiter, so no byte stuffing is needed: hex cannot
+// contain one.
+class HexLinePacketSink final : public IPacketSink {
+ public:
+  explicit HexLinePacketSink(IByteWriter &writer) : writer_(writer) {}
+  const char *name() const override { return "hex-line"; }
+  bool onPacket(const uint8_t *packet, size_t length) override;
+
+  uint32_t linesWritten() const { return written_; }
+  uint32_t shortWrites() const { return shortWrites_; }
+
+ private:
+  // "T " + two characters per byte + newline.
+  char     line_[2 + kMaxPacketBytes * 2 + 1] = {};
+  IByteWriter &writer_;
+  uint32_t     written_     = 0;
+  uint32_t     shortWrites_ = 0;
+};
+
 }  // namespace telemetry

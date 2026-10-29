@@ -30,7 +30,7 @@ using namespace telemetry;
 
 // With packets on the USB port the stream is binary, so nothing human-readable
 // may share it. On a separate UART the USB port is free for diagnostics.
-constexpr bool kVerbose = (TELEMETRY_OUTPUT_UART1 != 0);
+const bool kVerbose = !app::telemetryOutputIsBinaryOnUsb();
 
 constexpr uint32_t kFastPeriodMs     = 125;   // 8 Hz, the real ECU sweep rate
 constexpr uint32_t kPacketPeriodMs   = 1000;  // the 1 Hz group
@@ -190,7 +190,7 @@ void setup() {
   if (kVerbose) {
     Serial.printf("\n# MODE telemetry-selftest\n");
     Serial.printf("# SCHEMA v%u  seven packet types\n", telemetry::kSchemaVersion);
-    Serial.printf("# OUTPUT uart1 tx=%d %d baud\n", TELEMETRY_UART_TX_PIN, TELEMETRY_UART_BAUD);
+    Serial.printf("# OUTPUT %s\n", app::telemetryOutputName());
     Serial.printf("# WARNING every packet is SIMULATED, nothing here is measured\n");
   }
 }

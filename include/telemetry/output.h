@@ -45,4 +45,12 @@ const TelemetryQueue &telemetryQueue();
 uint32_t telemetryFramesWritten();
 uint32_t telemetryWriteFailures();
 
+// Which output mode this build selected, for the banner a consumer reads.
+const char *telemetryOutputName();
+
+// True when packets are binary frames on the USB port, in which case NOTHING
+// human-readable may be printed there - a text banner would be swallowed into
+// the first frame. An app checks this before printing anything.
+bool telemetryOutputIsBinaryOnUsb();
+
 }  // namespace app

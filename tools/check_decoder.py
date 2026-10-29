@@ -32,7 +32,12 @@ SOURCES = [
 ]
 
 sys.path.insert(0, HERE)
-from telemetry_decode import cobs_decode, decode_packet  # noqa: E402
+from telemetry_decode import (  # noqa: E402
+    StreamParser,
+    cobs_decode,
+    cobs_encode_for_test,
+    decode_packet,
+)
 
 failures = []
 
@@ -80,6 +85,67 @@ def read_packets(path: str) -> list:
             continue
         packets.append(pkt)
     return packets
+
+
+def check_stream_reassembly():
+    """The StreamParser's byte-consumption rules, which a live link found wrong.
+
+    A COBS body may contain 0x0A - COBS excludes only 0x00 - so a newline is a
+    frame boundary for the text form and an ordinary data byte for the binary
+    one. An earlier version let the text branch swallow it, which silently
+    dropped one byte from every binary frame containing a newline. The frame
+    then failed its CRC with nothing to indicate why, and roughly a third of
+    real traffic was affected.
+    """
+    packets = [p for p in read_packets(FIXTURE)]
+    raw = open(FIXTURE, "rb").read()
+
+    # 1. The committed fixture, fed one byte at a time rather than in chunks.
+    #    Reassembly must not depend on how the stream happens to be sliced.
+    parser = StreamParser()
+    got = []
+    for byte in raw:
+        got.extend(parser.feed(bytes([byte])))
+    check("byte-at-a-time packet count", len(got), len(packets))
+    check("byte-at-a-time framing errors", parser.framing_errors, 0)
+    check("byte-at-a-time verify errors", parser.verify_errors, 0)
+
+    # 2. A binary frame whose COBS body deliberately contains 0x0A. This is the
+    #    exact regression: it must decode, not be eaten by the text parser.
+    payload = bytes([0x0A] * 40)
+    body = b"\x5a\xe1" + payload  # not a valid packet; we only check framing
+    frame = cobs_encode_for_test(body)
+    check("newline survives COBS encoding", 0x00 not in frame, True)
+    check("the body really contains newlines", 0x0A in frame, True)
+
+    parser = StreamParser()
+    list(parser.feed(frame + b"\x00"))
+    # The frame is well-formed COBS but not a valid packet, so it must be
+    # counted as a verify failure - NOT as a framing failure, which would mean
+    # the bytes were mangled on the way in.
+    check("a newline-bearing frame is not mangled", parser.framing_errors, 0)
+    check("it is rejected on content, not framing", parser.verify_errors, 1)
+
+    # 3. Interleaved diagnostics must not disturb a hex-line stream, which is
+    #    the whole reason the hex form exists.
+    hex_lines = [b"T " + cobs_decode(f).hex().encode()
+                 for f in raw.split(b"\x00") if f]
+
+    # Diagnostics are injected BETWEEN lines, because that is how the firmware
+    # emits them: HexLinePacketSink writes each packet in a single call, and so
+    # does every Serial.printf, so a line is never torn in half.
+    mixed = bytearray(b"# MODE activa-obd\n# SCHEMA v2 out=usb-hex\n")
+    for n, hl in enumerate(hex_lines):
+        mixed += hl + b"\n"
+        if n % 2 == 1:
+            mixed += b"# RING 3/8 pub=12 drop=0\n"
+            mixed += b"R (12.345678) 18DAF110#03410C1A2C\n"
+
+    parser = StreamParser()
+    got = list(parser.feed(bytes(mixed)))
+    check("every packet survives interleaved diagnostics", len(got), len(hex_lines))
+    check("diagnostic lines are not framing errors", parser.framing_errors, 0)
+    check("diagnostic lines are not verify errors", parser.verify_errors, 0)
 
 
 def main() -> int:
@@ -237,6 +303,8 @@ def main() -> int:
     check("status.presence", s["presence_detected"], True)
     check("status.events", sorted(s["events"]), sorted(
         ["dtc_appeared", "mil_changed", "battery_fault", "rfid_presented"]))
+
+    check_stream_reassembly()
 
     if failures:
         print(f"FAIL: {len(failures)} mismatch(es) between the C++ structs and the decoder:",
