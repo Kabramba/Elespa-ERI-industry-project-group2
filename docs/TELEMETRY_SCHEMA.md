@@ -574,7 +574,7 @@ sensor board. v1 was never consumed externally.
 
 ## 14. Test coverage
 
-**113 host tests across nine suites, no hardware.** Run with `pio test -e native`.
+**135 host tests across ten suites, no hardware.** Run with `pio test -e native`.
 
 `test/test_telemetry/` — 15 tests, statistics and the envelope:
 
@@ -632,7 +632,31 @@ sensor board. v1 was never consumed externally.
 - only a **newly raised** protection bit is a fault
 - a battery poll that read nothing stays silent
 
+`test/test_spec_conformance/` — 22 tests, the published specification vs the
+firmware. The specification document is what other groups build against, so
+every numeric claim it makes is restated independently and checked:
+
+- each OBD-II formula swept over **all 256 values** of the raw byte, because an
+  off-by-one in a scale or an offset shows up only at the ends
+- JBD scaling, including a negative temperature, which is where a sign error hides
+- `cellSpreadMv` and `liveCellCount` against their published definitions
+- a 17-channel pack raising `kFlagPartial` through the real publish path
+- sequence numbering per source, shared across types, consumed by a refusal,
+  and wrapping at 65535 rather than saturating
+- the event mask being zero on the first packet, and a *cleared* protection bit
+  not raising a fault
+- DTC packing, CRC parameters and check value, the four receiver rejections
+- the COBS worst case: 324 bytes encode to 326, plus the delimiter is 327
+
 Plus `tools/check_decoder.py` for the C++ ↔ Python contract.
+
+### Layout conformance
+
+`sizeof` and `offsetof` for every published field are compared against the
+specification's own field tables, so a reordered or resized field fails rather
+than silently shifting every field after it. 194 checks across the header, the
+StatBlock, the seven payloads, every enumeration, every bit mask and the
+framing constants.
 
 ---
 

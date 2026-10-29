@@ -98,7 +98,9 @@ struct EngineTelemetry {
   uint16_t fields;
   uint8_t  fuelSystemStatus[2];   // PID 03, one enum per bank
   uint8_t  crcErrors;
-  uint8_t  reserved;
+  uint8_t  reserved[3];           // 2 of these are the alignment pad; declared so
+                                  // that the published field table accounts for
+                                  // every one of the 184 bytes
 };
 static_assert(sizeof(EngineTelemetry) == 184, "engine layout changed");
 
@@ -336,7 +338,7 @@ struct StatusEventTelemetry {
   uint8_t  motorState;            // MotorState
   uint8_t  presenceDetected;
   uint8_t  rollRisk;
-  uint8_t  reserved[5];
+  uint8_t  reserved[7];           // 2 of these are the alignment pad; see above
 };
 static_assert(sizeof(StatusEventTelemetry) == 64, "status layout changed");
 

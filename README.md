@@ -108,6 +108,7 @@ test/
   test_framing/          COBS, the 254-byte boundary, resynchronisation
   test_publisher/        sequencing, queue overflow, the whole path
   test_mappers/          acquisition -> schema, absent vs zero, edges
+  test_spec_conformance/ the PUBLISHED SPEC vs the firmware, formulas included
 
 tools/
   telemetry_decode.py    the reference host consumer
@@ -119,7 +120,7 @@ tools/
 Plus `docs/` (bring-up notes) and `reference/` (frozen sketches, superseded
 files). `tools/serial_read.py` still does bounded non-interactive captures.
 
-All nine suites run on the host: **113 tests in about four seconds, no board.**
+All ten suites run on the host: **135 tests in about four seconds, no board.**
 
 ## How it fits together
 
