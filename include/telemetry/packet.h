@@ -46,6 +46,10 @@ enum class SourceId : uint8_t {
   kFusion       = 6,  // a packet combining more than one source
 };
 
+// One past the highest SourceId, for sizing per-source arrays (the publisher
+// keeps a sequence counter each). Additive: it names no new wire value.
+constexpr size_t kSourceCount = 7;
+
 enum HeaderFlag : uint8_t {
   kFlagPartial   = 1 << 0,  // some fields missing this cycle; check the field mask
   kFlagDegraded  = 1 << 1,  // link quality below threshold, values may be stale
