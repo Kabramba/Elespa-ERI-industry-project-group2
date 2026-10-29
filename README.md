@@ -6,10 +6,11 @@ about what is on the other end; the JBD BMS is the first worked example, with a
 Daly BMS and a 2024 Activa's OBD-II port to follow.
 
 Telemetry from any link lands in a RAM-only ring buffer that the rest of the
-firmware reads through a const handle.
+firmware reads through a const handle, and is published as one of **seven
+versioned packet types** — see [Telemetry packet schema](#telemetry-packet-schema).
 
-Grew out of the JBD bring-up; that baseline is preserved on the **`jbd-bms`**
-branch, and the frozen hardware-validated Arduino sketches are in
+Grew out of the JBD bring-up; the frozen, hardware-validated Arduino sketches
+from that phase are preserved verbatim in
 [`reference/safe-save-copy-esp32/`](reference/safe-save-copy-esp32/).
 
 ---
@@ -45,60 +46,124 @@ include/                 public headers
   app_config.h           MASTER TOGGLES - CAN mode, LED brightness
   can/
     can_timing.h         bitrate -> register arithmetic (pure)
-    can_bus_profile.h    the profile structure + validation
+    can_bus_profile.h    the profile structure + validation + TX allowlist
     can_profile_registry.h  lookup into the static table
+    active_profile.h     which profile this build is running
     twai_profile.h       profile -> ESP32 TWAI registers (the only HW file)
-  bms_types.h            BmsSnapshot - the shared data model
+  obd/
+    obd_isotp.h          ISO-TP framing + THE REQUEST ALLOWLIST
+    vehicle_types.h      VehicleSnapshot - decoded PIDs plus raw samples
+  telemetry/
+    packets.h            THE PUBLISHED SCHEMA - seven payload structs
+    packet.h             the 16-byte envelope: magic, version, seq, CRC
+    stat_block.h         StatBlock + Welford running statistics
+  bms_types.h            BmsSnapshot - the battery data model
   bms_link.h             IBmsLink    - a source of telemetry
   bms_sink.h             IBmsSink    - a consumer of telemetry
-  bms_ring.h             the IPC ring buffer (header-only template)
+  snapshot_ring.h        util::SnapshotRing<T,N>, the IPC ring (header-only)
   platform_lock.h        the only file that knows about FreeRTOS
+  crc16.h                CRC-16/MODBUS, shared by JBD framing and the envelope
   jbd_protocol.h         pure encode/decode
   jbd_uart_link.h        UART transport
   jbd_can_link.h         CAN transport
-  telemetry.h            the shared buffer's accessors
+  telemetry.h            the two rings' accessors
   serial_sink.h          human-readable output
   ring_sink.h            publishes into the ring
   status_led.h           prioritised WS2812 status indicator
   summary_consumer.h     worked example of reading the ring
 
 src/
+  apps/                  one main() each, selected by build_src_filter
+    main_jbd.cpp           JBD BMS over UART + CAN
+    main_activa_probe.cpp  LISTEN ONLY bitrate probe
+    main_activa_obd.cpp    OBD-II reader, machine-readable output
   bms_types.cpp          derived statistics, naming
   jbd_protocol.cpp       pure decode        <- no Arduino, host-testable
-  telemetry.cpp          owns the one ring instance
+  crc16.cpp              pure, with a continuation form for split buffers
+  telemetry.cpp          owns the ring instances
   status_led.cpp         LED arbitration + the named states
   can/                   timing, profile utilities, THE PROFILE TABLE
+  obd/                   ISO-TP framing, PID decode
+  telemetry/             envelope encode/verify, running statistics
   links/                 jbd_uart_link.cpp, jbd_can_link.cpp
   sinks/                 serial_sink.cpp
   consumers/             summary_consumer.cpp
-  main.cpp               wiring only
 
 test/
   test_protocol/         decode tests, fixtures captured off the real pack
   test_ring/             ring overflow, ordering, both read paths
   test_status_led/       LED priority, expiry, blink, token safety
   test_can_profile/      timing solver, validation rules, registry
+  test_obd/              ISO-TP reassembly, the request allowlist
+  test_telemetry/        envelope round-trip, CRC rejection, statistics
 ```
 
 Plus `docs/` (bring-up notes) and `reference/` (frozen sketches, superseded
 files). `tools/serial_read.py` still does bounded non-interactive captures.
 
-All three test suites run on the host: **29 tests in about a second, no board.**
+All six suites run on the host: **71 tests in about two seconds, no board.**
 
 ## How it fits together
 
 `IBmsLink::poll()` produces a `BmsSnapshot`. `IBmsSink::onSnapshot()` consumes
-one. `main.cpp` does nothing but connect them:
+one. The application in `src/apps/` does nothing but connect them:
 
 ```
-JbdUartLink ─┐                    ┌─ RingSink ──> BmsRing<16> ──> any consumer
+JbdUartLink ─┐                    ┌─ RingSink ──> SnapshotRing<16> ─> any consumer
              ├─> BmsSnapshot ────>┤
 JbdCanLink  ─┘                    └─ SerialSink
 ```
 
 Adding a transport means one more `IBmsLink`. Adding a consumer means one more
-`IBmsSink`. Neither touches the protocol layer, and `main.cpp` changes by one
-array entry.
+`IBmsSink`. Neither touches the protocol layer, and the application changes by
+one array entry.
+
+## Telemetry packet schema
+
+The project's deliverable. Four heterogeneous sources — the Activa engine ECU,
+a BMS (JBD or Daly), the Votol EM-30S motor driver, and the partner group's
+sensor board — are normalised into **seven packet types**, grouped by *how fast
+their fields change*, because that is what sets how often each must be sent.
+
+| Type | Value | Rate | Payload bytes |
+|---|---|---|---|
+| `kIdentity` | `0x01` | on change / 60 s keepalive | 112 |
+| `kEngine` | `0x10` | 1 Hz | 184 |
+| `kMotor` | `0x11` | 1 Hz | 152 |
+| `kDynamics` | `0x12` | 1 Hz | 308 |
+| `kNavigation` | `0x13` | 1 Hz | 128 |
+| `kBattery` | `0x20` | 1 Hz | 128 |
+| `kStatusEvent` | `0x30` | on change | 64 |
+
+Every packet travels behind a 16-byte envelope — magic `0xE15A`, schema
+version, type, length, per-source sequence, producer uptime, source id, flags,
+CRC-16/MODBUS. **The transport is deliberately out of scope:** these are byte
+layouts, so UART, Wi-Fi, LoRa or shared memory all carry the same bytes.
+
+```cpp
+uint8_t buf[telemetry::kHeaderBytes + sizeof(telemetry::BatteryTelemetry)];
+size_t n = telemetry::encode(telemetry::PacketType::kBattery,
+                             telemetry::SourceId::kBatteryA,
+                             seq++, millis(), 0, pkt, buf, sizeof buf);
+// on the consumer
+if (telemetry::verify(buf, n)) { /* ... */ }
+```
+
+Three rules the schema does not bend on:
+
+- **Wire values are frozen once published.** Append, never renumber.
+- **Every payload carries a `fields` mask.** A dropped reading is never
+  presented as a zero.
+- **Fast channels arrive as `StatBlock`s,** not bare samples: min, max, mean,
+  stddev, last, slope, window, count — 32 bytes that describe a second of a
+  200 Hz accelerometer without shipping 200 samples. Statistics are accumulated
+  with Welford's algorithm, and an absent channel reports `NaN` with
+  `samples == 0` so it can never be mistaken for a plausible zero.
+
+Full field-by-field reference, including the provenance of every value and
+which source supplies it: **[`docs/TELEMETRY_SCHEMA.md`](docs/TELEMETRY_SCHEMA.md)**.
+The 17 ECU values and their units are in
+[`docs/ECU_schema.md`](docs/ECU_schema.md).
 
 ## The telemetry rings
 
@@ -121,7 +186,7 @@ the ECU said is discarded just because we lack a formula for it. Use
 `obd::hasPid()` before trusting a decoded value: a PID that never answered is
 not the same as a reading of zero.
 
-## The telemetry ring
+### Access, storage and overflow
 
 `app::telemetry()` returns a `const TelemetryRing&` — every method reachable
 through it is const, so a consumer cannot publish. `app::telemetryProducer()`
