@@ -80,7 +80,7 @@ battery    battery_a       #1799  [simulated] 53.74 V  -3.53 A  soc 42%  spread 
 dynamics   sensor_group_1  #3596  [simulated] ax 0.099 az 1.069 g  n=40  window 200 ms
 ```
 
-Every packet from this application carries the `simulated` flag. The values are
+Every packet from this (`tools/telemetry_decode.py /dev/ttyACM0`) application carries the `simulated` flag. The values are
 generated on the device and are not measurements.
 
 A web dashboard is available for the OBD-II application:
