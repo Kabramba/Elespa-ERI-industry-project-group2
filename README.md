@@ -33,13 +33,6 @@ so the schema is specified separately in
 | BMS UART | GPIO18 = RX from BMS TXD, GPIO17 = TX to BMS RXD, VDD unconnected |
 | Telemetry output | GPIO15 = TX, 115200 8N1 |
 
-The CAN pin order above is the reverse of what the transceiver notes suggest. It
-was established by measurement and should not be changed.
-
-PlatformIO ships `esp32-s3-devkitc-1` only as the 8 MB variant. The module used
-here is 16 MB, which `board_upload.flash_size` in `platformio.ini` accounts for.
-PSRAM is left disabled as nothing in this firmware requires it.
-
 ## Building
 
 Requires [PlatformIO](https://platformio.org/). The host-side tools need a few
