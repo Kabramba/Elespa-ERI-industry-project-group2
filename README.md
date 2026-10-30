@@ -21,16 +21,6 @@ so the schema is specified separately in
 | Motor driver | Votol EM-30S | UART or CAN, undetermined | Not implemented |
 | Sensor board | Group 1 hardware | Not yet defined | Not implemented |
 
-Measured link reliability:
-
-| Link | Result |
-|---|---|
-| JBD over UART | 100% of polls answered, all 17 channels |
-| JBD over CAN | 86–87% with hardware retransmission, 0 CRC errors |
-| Activa ECU | 17 supported PIDs read, plus VIN, calibration ID, CVN and DTC status |
-
-Engine data was captured with the engine running: RPM near 1500 at idle, manifold
-pressure 51–92 kPa, ignition advance 8.0–9.5° BTDC, calculated load 33–35%.
 
 ## Hardware
 
