@@ -159,16 +159,3 @@ When the board is connected to a vehicle diagnostic connector, the host computer
 must run on battery. Mains earth and vehicle chassis are separate references and
 connecting both creates a ground loop through the CAN transceiver.
 
-## Known limitations
-
-- The Votol EM-30S interface has not been established. Byte positions in the
-  motor packet come from published field maps for a related controller and are
-  unverified.
-- Group 1's board-to-board format is undefined, so the dynamics and navigation
-  packets have no data source.
-- CAN reliability to the BMS declined over several days of testing. Bus
-  termination and the transceiver slope-control pin have not been measured.
-- The bench battery is a 16S pack on a BMS configured for 17 channels. Channel
-  10 reads 0 mV, which latches an undervoltage protection and holds the
-  discharge MOSFET off. Correcting it requires a write to the BMS, which has
-  not been performed.
