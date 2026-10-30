@@ -21,7 +21,6 @@ so the schema is specified separately in
 | Motor driver | Votol EM-30S | UART or CAN, undetermined | Not implemented |
 | Sensor board | Group 1 hardware | Not yet defined | Not implemented |
 
-
 ## Hardware
 
 | Item | Value |
@@ -80,7 +79,7 @@ battery    battery_a       #1799  [simulated] 53.74 V  -3.53 A  soc 42%  spread 
 dynamics   sensor_group_1  #3596  [simulated] ax 0.099 az 1.069 g  n=40  window 200 ms
 ```
 
-Every packet from this (`tools/telemetry_decode.py /dev/ttyACM0`) application carries the `simulated` flag. The values are
+Every packet from this application carries the `simulated` flag. The values are
 generated on the device and are not measurements.
 
 A web dashboard is available for the OBD-II application:
@@ -141,4 +140,3 @@ Vehicle access is read-only, enforced in code.
 When the board is connected to a vehicle diagnostic connector, the host computer
 must run on battery. Mains earth and vehicle chassis are separate references and
 connecting both creates a ground loop through the CAN transceiver.
-
